@@ -1,0 +1,18 @@
+[package]
+name = "anima-tagger-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "anima-tagger-gui"
+path = "src/main.rs"
+
+[dependencies]
+anima-tagger-core = { workspace = true }
+dioxus = { version = "0.6", features = ["desktop"] }
+serde = { workspace = true }
+anyhow = { workspace = true }
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp"] }
+base64 = "0.22"
