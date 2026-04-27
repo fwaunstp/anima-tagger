@@ -9,7 +9,6 @@
 //! For caption tasks (~50–200 tokens) on CPU this is workable; KV cache can be
 //! wired in later by switching to `decoder_model_merged.onnx`.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use anima_tagger_core::config::CaptionerProfile;
@@ -75,28 +74,23 @@ impl Captioner {
             CaptionerError::Tokenizer(format!("loading {}: {e}", tokenizer_path.display()))
         })?;
 
-        // Florence-2 task tokens (e.g. `<MORE_DETAILED_CAPTION>`) live in the
-        // companion `added_tokens.json` rather than inside `tokenizer.json`,
-        // so the rust tokenizers crate's encode path BPE-subtokenizes them
-        // (one round of debugging confirmed this empirically). Resolve via a
-        // small fallback that consults `added_tokens.json` when the main
-        // tokenizer doesn't know the token.
-        let extra_added = load_added_tokens(dir);
-        let bos_id = resolve_token_id(&tokenizer, &extra_added, "<s>").unwrap_or(0);
-        let eos_id = resolve_token_id(&tokenizer, &extra_added, "</s>").unwrap_or(2);
-        let task_id = resolve_token_id(&tokenizer, &extra_added, profile.prompt.as_str())
-            .ok_or_else(|| {
-                let known: Vec<&String> = extra_added.keys().collect();
-                CaptionerError::Tokenizer(format!(
-                    "task token {:?} not found in tokenizer.json or added_tokens.json. \
-                     Tokens present in added_tokens.json: {:?}",
-                    profile.prompt, known
-                ))
-            })?;
-        let prompt_token_ids: Vec<i64> = vec![bos_id as i64, task_id as i64, eos_id as i64];
+        // Florence-2's user-facing task names (`<CAPTION>`,
+        // `<MORE_DETAILED_CAPTION>`, etc.) are NOT special tokens in the
+        // model vocabulary — the HF processor expands them to natural-language
+        // questions before tokenization. The model is trained on the expanded
+        // text, so we apply the same mapping here. Anything not recognized as
+        // a task token is passed through verbatim (allowing free-form prompts
+        // for tasks not in this table, or pre-expanded inputs).
+        let expanded = expand_task_prompt(&profile.prompt);
+        let encoding = tokenizer
+            .encode(expanded, true)
+            .map_err(|e| CaptionerError::Tokenizer(e.to_string()))?;
+        let prompt_token_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
         eprintln!(
-            "[captioner:prompt] {:?} -> ids={:?} (bos={bos_id} task={task_id} eos={eos_id})",
-            profile.prompt, prompt_token_ids
+            "[captioner:prompt] {:?} -> {:?} ({} tokens)",
+            profile.prompt,
+            expanded,
+            prompt_token_ids.len()
         );
 
         Ok(Self {
@@ -270,25 +264,23 @@ impl Captioner {
     }
 }
 
-/// Read `added_tokens.json` from the model directory if present.
-/// Returns an empty map on missing/malformed file — the caller can still
-/// succeed if the main tokenizer.json knows the requested token.
-fn load_added_tokens(dir: &Path) -> HashMap<String, u32> {
-    let path = dir.join("added_tokens.json");
-    let Ok(s) = std::fs::read_to_string(&path) else {
-        return HashMap::new();
-    };
-    serde_json::from_str(&s).unwrap_or_default()
-}
-
-fn resolve_token_id(
-    tokenizer: &Tokenizer,
-    extra_added: &HashMap<String, u32>,
-    name: &str,
-) -> Option<u32> {
-    tokenizer
-        .token_to_id(name)
-        .or_else(|| extra_added.get(name).copied())
+/// Map Florence-2 user-facing task names to the natural-language prompts the
+/// model was actually trained on. Unknown inputs pass through unchanged so
+/// callers can also supply raw text or pre-expanded prompts.
+///
+/// Mirrors `task_prompts_without_inputs` in HF's Florence2Processor.
+fn expand_task_prompt(prompt: &str) -> &str {
+    match prompt {
+        "<OCR>" => "What is the text in the image?",
+        "<OCR_WITH_REGION>" => "What is the text in the image, with regions?",
+        "<CAPTION>" => "What does the image describe?",
+        "<DETAILED_CAPTION>" => "Describe in detail what is shown in the image.",
+        "<MORE_DETAILED_CAPTION>" => "Describe with a paragraph what is shown in the image.",
+        "<OD>" => "Locate the objects with category name in the image.",
+        "<DENSE_REGION_CAPTION>" => "Locate the objects in the image, with their descriptions.",
+        "<REGION_PROPOSAL>" => "Locate the region proposals in the image.",
+        other => other,
+    }
 }
 
 fn build_session(path: &Path, label: &str) -> Result<Session, CaptionerError> {
