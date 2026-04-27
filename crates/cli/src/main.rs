@@ -300,11 +300,8 @@ fn cmd_metadata(
                 serde_json::Value::String(tags.join(", ")),
             );
         }
-        if let Some(cap) = sidecar.caption.as_ref() {
-            entry.insert(
-                "caption".to_string(),
-                serde_json::Value::String(cap.clone()),
-            );
+        if let Some(cap) = sidecar.merged_caption() {
+            entry.insert("caption".to_string(), serde_json::Value::String(cap));
         }
         if entry.is_empty() {
             continue;

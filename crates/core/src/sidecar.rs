@@ -34,8 +34,15 @@ pub struct Sidecar {
     pub auto_tags: Vec<AutoTag>,
     #[serde(default)]
     pub booru_tags: Vec<BooruTag>,
+    /// Auto-generated caption from the captioner (Florence-2 etc). Read-only
+    /// from the GUI's perspective — overwritten on each captioner run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
+    /// User-curated caption fragment, prepended to the auto caption on export.
+    /// Use for image-specific facts the captioner can't know (character
+    /// names, scene context) — survives captioner re-runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_caption: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tagger: Option<TaggerInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,6 +160,36 @@ impl Sidecar {
 
     pub fn is_captioned(&self) -> bool {
         self.captioner.is_some()
+    }
+
+    /// Combine `manual_caption` (prepended) with the auto `caption`. Empty
+    /// strings are treated as None. Returns None only if both are empty.
+    pub fn merged_caption(&self) -> Option<String> {
+        let manual = self
+            .manual_caption
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let auto = self
+            .caption
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match (manual, auto) {
+            (Some(m), Some(a)) => Some(format!("{m} {a}")),
+            (Some(m), None) => Some(m.to_string()),
+            (None, Some(a)) => Some(a.to_string()),
+            (None, None) => None,
+        }
+    }
+
+    pub fn set_manual_caption(&mut self, text: &str) {
+        let trimmed = text.trim();
+        self.manual_caption = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
     }
 
     pub fn has_booru(&self) -> bool {

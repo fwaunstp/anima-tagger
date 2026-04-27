@@ -323,7 +323,11 @@ fn DetailPanel(
         aside { class: "detail",
             if n == 1 {
                 if let Some(item) = imgs_snapshot.iter().find(|i| i.path == sel_paths[0]) {
-                    SingleDetail { item: item.clone(), images, selected, tag_input }
+                    SingleDetail {
+                        key: "{item.path.display()}",
+                        item: item.clone(),
+                        images, selected, tag_input,
+                    }
                 }
             } else {
                 BulkDetail {
@@ -446,9 +450,13 @@ fn SingleDetail(
             }
         }
 
+        div { class: "section-title", "Caption" }
+        ManualCaptionEditor { path: path.clone(), images, initial: item.sidecar.manual_caption.clone().unwrap_or_default() }
         if let Some(c) = item.sidecar.caption.as_ref() {
-            div { class: "section-title", "Caption" }
+            p { class: "muted small", "Auto caption (read-only):" }
             p { class: "caption", "{c}" }
+        } else {
+            p { class: "muted small", "(no auto caption — run captioner)" }
         }
         if let Some(b) = item.sidecar.booru.as_ref() {
             div { class: "section-title", "Booru" }
@@ -457,6 +465,34 @@ fn SingleDetail(
                 if let Some(id) = b.post_id { ": #{id}" }
             }
         }
+    }
+}
+
+#[component]
+fn ManualCaptionEditor(
+    path: PathBuf,
+    images: Signal<Vec<ImageItem>>,
+    initial: String,
+) -> Element {
+    let mut buf = use_signal(|| initial.clone());
+    let path_for_change = path.clone();
+    rsx! {
+        textarea {
+            class: "manual-caption",
+            placeholder: "Manual caption (e.g. \"Left girl is Alice. Right girl is Bob.\") — prepended to auto caption on export. Click outside to save.",
+            value: "{buf}",
+            rows: "3",
+            oninput: move |evt| buf.set(evt.value()),
+            onchange: move |evt| save_manual_caption(images, path_for_change.clone(), evt.value()),
+        }
+    }
+}
+
+fn save_manual_caption(mut images: Signal<Vec<ImageItem>>, path: PathBuf, text: String) {
+    let mut imgs = images.write();
+    if let Some(img) = imgs.iter_mut().find(|i| i.path == path) {
+        img.sidecar.set_manual_caption(&text);
+        let _ = img.sidecar.save(&img.path);
     }
 }
 
@@ -882,6 +918,19 @@ body {
 .muted { color: #999; font-size: 12px; margin: 0; }
 .muted.small { font-size: 11px; }
 .caption { color: #ddd; font-size: 12px; line-height: 1.4; margin: 4px 0; }
+.manual-caption {
+    width: 100%;
+    background: #1e2a3a;
+    border: 1px solid #2d4a6e;
+    color: #cfe3ff;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: inherit;
+    resize: vertical;
+    min-height: 60px;
+}
+.manual-caption:focus { outline: 1px solid #4a9eff; border-color: #4a9eff; }
 code {
     background: #2a2a2a; padding: 1px 4px; border-radius: 3px;
     font-family: ui-monospace, monospace; font-size: 11px;
