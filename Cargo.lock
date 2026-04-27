@@ -41,6 +41,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "anima-tagger-booru"
+version = "0.1.0"
+dependencies = [
+ "anima-tagger-core",
+ "chrono",
+ "md5",
+ "serde",
+ "thiserror 2.0.18",
+ "ureq 2.12.1",
+]
+
+[[package]]
 name = "anima-tagger-captioner"
 version = "0.1.0"
 dependencies = [
@@ -56,6 +68,7 @@ dependencies = [
 name = "anima-tagger-cli"
 version = "0.1.0"
 dependencies = [
+ "anima-tagger-booru",
  "anima-tagger-captioner",
  "anima-tagger-core",
  "anima-tagger-tagger",
@@ -81,9 +94,13 @@ dependencies = [
 name = "anima-tagger-gui"
 version = "0.1.0"
 dependencies = [
+ "anima-tagger-booru",
+ "anima-tagger-captioner",
  "anima-tagger-core",
+ "anima-tagger-tagger",
  "anyhow",
  "base64 0.22.1",
+ "chrono",
  "dioxus",
  "image",
  "rfd 0.15.4",
@@ -3109,6 +3126,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "md5"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3616,7 +3639,7 @@ checksum = "d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133"
 dependencies = [
  "ort-sys",
  "smallvec",
- "ureq",
+ "ureq 3.3.0",
 ]
 
 [[package]]
@@ -3627,7 +3650,7 @@ checksum = "d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90"
 dependencies = [
  "hmac-sha256",
  "lzma-rust2",
- "ureq",
+ "ureq 3.3.0",
 ]
 
 [[package]]
@@ -5472,6 +5495,24 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "ureq"
+version = "2.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "log",
+ "once_cell",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "url",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "ureq"
 version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
@@ -5484,7 +5525,7 @@ dependencies = [
  "socks",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -5867,6 +5908,15 @@ dependencies = [
  "pkg-config",
  "soup3-sys",
  "system-deps",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]

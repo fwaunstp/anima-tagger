@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use anima_tagger_booru::{BooruClient, BooruError};
 use anima_tagger_captioner::Captioner;
 use anima_tagger_core::config::ProjectConfig;
 use anima_tagger_core::export;
@@ -13,7 +14,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "anima-tagger",
-    about = "Manage manual + auto tags and captions for ANIMA-style LoRA datasets"
+    about = "Manage manual + auto + booru tags and captions for ANIMA-style LoRA datasets"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -45,7 +46,17 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Merge manual + auto tags and write `<image>.txt` for training.
+    /// Fetch tags from a booru API by image MD5 hash.
+    Booru {
+        dir: PathBuf,
+        /// Booru source (`danbooru` is the only one currently implemented).
+        #[arg(long, default_value = "danbooru")]
+        source: String,
+        /// Re-fetch images that already have booru data.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Merge manual + auto + booru tags and write `<image>.txt` for training.
     Export {
         dir: PathBuf,
         #[arg(long)]
@@ -67,6 +78,7 @@ fn main() -> Result<()> {
             threshold,
         } => cmd_tag(dir, model, force, threshold),
         Command::Caption { dir, model, force } => cmd_caption(dir, model, force),
+        Command::Booru { dir, source, force } => cmd_booru(dir, source, force),
         Command::Export {
             dir,
             profile,
@@ -168,6 +180,45 @@ fn cmd_caption(dir: PathBuf, model_name: Option<String>, force: bool) -> Result<
     Ok(())
 }
 
+fn cmd_booru(dir: PathBuf, source: String, force: bool) -> Result<()> {
+    let client = match source.as_str() {
+        "danbooru" => BooruClient::danbooru(),
+        other => anyhow::bail!(
+            "unsupported booru source `{other}` (only 'danbooru' is implemented)"
+        ),
+    };
+
+    let mut fetched = 0usize;
+    let mut not_found = 0usize;
+    let mut skipped = 0usize;
+    for image in iter_images(&dir) {
+        let mut sc = Sidecar::load_or_default(&image)?;
+        if !force && sc.has_booru() {
+            skipped += 1;
+            continue;
+        }
+        match client.fetch_for_image(&image) {
+            Ok((tags, info)) => {
+                let n = tags.len();
+                sc.booru_tags = tags;
+                sc.booru = Some(info);
+                sc.save(&image)?;
+                fetched += 1;
+                println!("fetched {} ({n} tags)", image.display());
+            }
+            Err(BooruError::NotFound(_)) => {
+                not_found += 1;
+                println!("not on booru: {}", image.display());
+            }
+            Err(e) => {
+                eprintln!("error: {}: {e}", image.display());
+            }
+        }
+    }
+    println!("done: {fetched} fetched, {not_found} not found, {skipped} skipped");
+    Ok(())
+}
+
 fn cmd_export(dir: PathBuf, profile_name: Option<String>, threshold: Option<f32>) -> Result<()> {
     let cfg = ProjectConfig::load_or_default(&dir)
         .with_context(|| format!("loading config in {}", dir.display()))?;
@@ -197,12 +248,13 @@ fn cmd_export(dir: PathBuf, profile_name: Option<String>, threshold: Option<f32>
 fn cmd_status(dir: PathBuf) -> Result<()> {
     for image in iter_images(&dir) {
         match Sidecar::load(&image)? {
-            None => println!("[  ] manual=0   {}", image.display()),
+            None => println!("[   ] manual=0   {}", image.display()),
             Some(s) => {
                 let auto = if s.is_auto_tagged() { 'T' } else { ' ' };
                 let cap = if s.is_captioned() { 'C' } else { ' ' };
+                let booru = if s.has_booru() { 'B' } else { ' ' };
                 let n = s.manual_tags.len();
-                println!("[{auto}{cap}] manual={n:<3} {}", image.display());
+                println!("[{auto}{cap}{booru}] manual={n:<3} {}", image.display());
             }
         }
     }

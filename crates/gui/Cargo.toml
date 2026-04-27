@@ -10,9 +10,13 @@ path = "src/main.rs"
 
 [dependencies]
 anima-tagger-core = { workspace = true }
+anima-tagger-tagger = { workspace = true }
+anima-tagger-captioner = { workspace = true }
+anima-tagger-booru = { workspace = true }
 dioxus = { version = "0.6", features = ["desktop"] }
 serde = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
 rfd = "0.15"
 image = { workspace = true }
 base64 = "0.22"

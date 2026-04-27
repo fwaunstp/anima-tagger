@@ -24,14 +24,18 @@ pub fn export_text_path(image: &Path) -> PathBuf {
 
 /// Build the final ordered tag list for a single image, applying:
 /// - threshold + category exclusion to auto tags
+/// - suppression of any auto/booru tag named in a `-foo` manual entry
 /// - category prefix formatting (e.g. ANIMA artist `@`)
 /// - dedup (manual wins on collision; comparison is prefix-stripped, lowercase)
 /// - optional shuffle
+///
+/// Negative manual entries (`-foo`) are never emitted as positive tags.
 pub fn build_tags(sidecar: &Sidecar, profile: &ExportProfile) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let suppressed = sidecar.suppressed_set();
 
-    for raw in &sidecar.manual_tags {
+    for raw in sidecar.manual_positive_tags() {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             continue;
@@ -46,14 +50,27 @@ pub fn build_tags(sidecar: &Sidecar, profile: &ExportProfile) -> Vec<String> {
         if at.score < profile.threshold {
             continue;
         }
-        if profile
-            .exclude_categories
-            .iter()
-            .any(|c| c == &at.category)
-        {
+        if profile.exclude_categories.iter().any(|c| c == &at.category) {
             continue;
         }
-        let formatted = format_auto_tag(&at.tag, &at.category, profile);
+        if suppressed.contains(&at.tag.to_lowercase()) {
+            continue;
+        }
+        let formatted = format_external_tag(&at.tag, &at.category, profile);
+        let stem = normalize_stem(&formatted, profile);
+        if seen.insert(stem) {
+            out.push(formatted);
+        }
+    }
+
+    for bt in &sidecar.booru_tags {
+        if profile.exclude_categories.iter().any(|c| c == &bt.category) {
+            continue;
+        }
+        if suppressed.contains(&bt.tag.to_lowercase()) {
+            continue;
+        }
+        let formatted = format_external_tag(&bt.tag, &bt.category, profile);
         let stem = normalize_stem(&formatted, profile);
         if seen.insert(stem) {
             out.push(formatted);
@@ -82,7 +99,7 @@ pub fn export_image(
     Ok(out)
 }
 
-fn format_auto_tag(tag: &str, category: &str, profile: &ExportProfile) -> String {
+fn format_external_tag(tag: &str, category: &str, profile: &ExportProfile) -> String {
     match profile.category_prefix(category) {
         Some(p) => format!("{p}{tag}"),
         None => tag.to_string(),
@@ -104,7 +121,7 @@ fn normalize_stem(s: &str, profile: &ExportProfile) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sidecar::AutoTag;
+    use crate::sidecar::{AutoTag, BooruTag};
 
     fn no_shuffle(mut p: ExportProfile) -> ExportProfile {
         p.shuffle = false;
@@ -131,7 +148,6 @@ mod tests {
         };
         let profile = no_shuffle(ExportProfile::anima());
         let tags = build_tags(&sidecar, &profile);
-        // manual `tezuka_osamu` keeps its raw form, and `@tezuka_osamu` from auto is deduped out
         assert_eq!(tags, vec!["tezuka_osamu".to_string(), "1girl".to_string()]);
     }
 
@@ -217,5 +233,81 @@ mod tests {
                 "1girl".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn negative_manual_suppresses_auto() {
+        let sidecar = Sidecar {
+            manual_tags: vec!["-watermark".into()],
+            auto_tags: vec![
+                AutoTag {
+                    tag: "watermark".into(),
+                    score: 0.9,
+                    category: "meta".into(),
+                },
+                AutoTag {
+                    tag: "1girl".into(),
+                    score: 0.9,
+                    category: "general".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let profile = no_shuffle(ExportProfile::default());
+        let tags = build_tags(&sidecar, &profile);
+        assert_eq!(tags, vec!["1girl".to_string()]);
+    }
+
+    #[test]
+    fn negative_manual_not_emitted_as_positive() {
+        let sidecar = Sidecar {
+            manual_tags: vec!["-foo".into(), "bar".into()],
+            ..Default::default()
+        };
+        let profile = no_shuffle(ExportProfile::default());
+        let tags = build_tags(&sidecar, &profile);
+        assert_eq!(tags, vec!["bar".to_string()]);
+    }
+
+    #[test]
+    fn booru_tags_exported_with_artist_prefix() {
+        let sidecar = Sidecar {
+            booru_tags: vec![
+                BooruTag {
+                    tag: "tezuka_osamu".into(),
+                    category: "artist".into(),
+                },
+                BooruTag {
+                    tag: "astro_boy".into(),
+                    category: "copyright".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let profile = no_shuffle(ExportProfile::anima());
+        let tags = build_tags(&sidecar, &profile);
+        assert_eq!(tags.len(), 2);
+        assert!(tags.contains(&"@tezuka_osamu".to_string()));
+        assert!(tags.contains(&"astro_boy".to_string()));
+    }
+
+    #[test]
+    fn suppression_works_across_sources() {
+        let sidecar = Sidecar {
+            manual_tags: vec!["-1girl".into()],
+            auto_tags: vec![AutoTag {
+                tag: "1girl".into(),
+                score: 0.9,
+                category: "general".into(),
+            }],
+            booru_tags: vec![BooruTag {
+                tag: "1girl".into(),
+                category: "general".into(),
+            }],
+            ..Default::default()
+        };
+        let profile = no_shuffle(ExportProfile::default());
+        let tags = build_tags(&sidecar, &profile);
+        assert!(tags.is_empty());
     }
 }

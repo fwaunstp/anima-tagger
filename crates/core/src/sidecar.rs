@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,24 +18,42 @@ pub mod category {
 
 pub const SIDECAR_SUFFIX: &str = ".ron";
 
+/// Manual entries beginning with this character are treated as suppression
+/// markers (e.g. `-watermark` removes any auto/booru tag with stem `watermark`
+/// from the export, regardless of which tagger produced it).
+pub const NEGATIVE_PREFIX: char = '-';
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Sidecar {
+    /// Manual entries. `foo` = positive (always exported); `-foo` = suppression
+    /// marker (removes matching auto/booru tag from export). Negative entries
+    /// are never themselves emitted to the training `.txt` file.
     #[serde(default)]
     pub manual_tags: Vec<String>,
     #[serde(default)]
     pub auto_tags: Vec<AutoTag>,
+    #[serde(default)]
+    pub booru_tags: Vec<BooruTag>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tagger: Option<TaggerInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captioner: Option<CaptionerInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booru: Option<BooruInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoTag {
     pub tag: String,
     pub score: f32,
+    pub category: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BooruTag {
+    pub tag: String,
     pub category: String,
 }
 
@@ -48,6 +67,16 @@ pub struct TaggerInfo {
 pub struct CaptionerInfo {
     pub model: String,
     pub captioned_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BooruInfo {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_url: Option<String>,
+    pub fetched_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Error)]
@@ -126,6 +155,46 @@ impl Sidecar {
         self.captioner.is_some()
     }
 
+    pub fn has_booru(&self) -> bool {
+        self.booru.is_some()
+    }
+
+    /// Iterates positive manual entries (skipping suppression markers).
+    pub fn manual_positive_tags(&self) -> impl Iterator<Item = &str> {
+        self.manual_tags
+            .iter()
+            .filter(|t| !t.trim().starts_with(NEGATIVE_PREFIX))
+            .map(|t| t.as_str())
+    }
+
+    /// Returns lowercase stems suppressed by `-foo` manual entries.
+    pub fn suppressed_set(&self) -> HashSet<String> {
+        self.manual_tags
+            .iter()
+            .filter_map(|t| {
+                t.trim()
+                    .strip_prefix(NEGATIVE_PREFIX)
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+            })
+            .collect()
+    }
+
+    pub fn is_suppressed(&self, tag: &str) -> bool {
+        let key = tag.trim().to_lowercase();
+        if key.is_empty() {
+            return false;
+        }
+        self.manual_tags.iter().any(|m| {
+            m.trim()
+                .strip_prefix(NEGATIVE_PREFIX)
+                .map(|s| s.trim().to_lowercase() == key)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Append a manual entry verbatim (positive or `-foo` suppression). Returns
+    /// `true` if newly added, `false` if it was already present or empty.
     pub fn add_manual_tag(&mut self, tag: impl Into<String>) -> bool {
         let t = tag.into();
         let trimmed = t.trim();
@@ -139,6 +208,28 @@ impl Sidecar {
     pub fn remove_manual_tag(&mut self, tag: &str) -> bool {
         let before = self.manual_tags.len();
         self.manual_tags.retain(|x| x != tag);
+        before != self.manual_tags.len()
+    }
+
+    /// Add `-tag` as a suppression marker if not already present.
+    pub fn suppress(&mut self, tag: &str) -> bool {
+        let trimmed = tag.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let neg = format!("-{trimmed}");
+        if self.manual_tags.iter().any(|x| x == &neg) {
+            return false;
+        }
+        self.manual_tags.push(neg);
+        true
+    }
+
+    /// Remove the `-tag` suppression marker if present.
+    pub fn unsuppress(&mut self, tag: &str) -> bool {
+        let neg = format!("-{}", tag.trim());
+        let before = self.manual_tags.len();
+        self.manual_tags.retain(|x| x != &neg);
         before != self.manual_tags.len()
     }
 }

@@ -2,9 +2,14 @@ use std::collections::HashSet;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use anima_tagger_core::sidecar::Sidecar;
+use anima_tagger_booru::{BooruClient, BooruError};
+use anima_tagger_captioner::Captioner;
+use anima_tagger_core::config::ProjectConfig;
+use anima_tagger_core::sidecar::{CaptionerInfo, Sidecar, TaggerInfo};
 use anima_tagger_core::walk::iter_images;
+use anima_tagger_tagger::Tagger;
 use base64::Engine;
+use chrono::Utc;
 use dioxus::prelude::*;
 use image::ImageFormat;
 
@@ -27,6 +32,8 @@ enum Filter {
     Untagged,
     AutoTagged,
     NoManual,
+    NoCaption,
+    NoBooru,
 }
 
 impl Filter {
@@ -36,6 +43,8 @@ impl Filter {
             Self::Untagged => "Untagged",
             Self::AutoTagged => "Auto-tagged",
             Self::NoManual => "No manual tags",
+            Self::NoCaption => "No caption",
+            Self::NoBooru => "No booru",
         }
     }
     fn matches(self, item: &ImageItem) -> bool {
@@ -44,6 +53,8 @@ impl Filter {
             Self::Untagged => !item.sidecar.is_auto_tagged() && item.sidecar.manual_tags.is_empty(),
             Self::AutoTagged => item.sidecar.is_auto_tagged(),
             Self::NoManual => item.sidecar.manual_tags.is_empty(),
+            Self::NoCaption => !item.sidecar.is_captioned(),
+            Self::NoBooru => !item.sidecar.has_booru(),
         }
     }
 }
@@ -56,6 +67,9 @@ fn App() -> Element {
     let filter = use_signal(|| Filter::All);
     let loading = use_signal(|| false);
     let tag_input = use_signal(String::new);
+    let error_msg = use_signal(|| None::<String>);
+    let tagger_state: Signal<Option<Tagger>> = use_signal(|| None);
+    let captioner_state: Signal<Option<Captioner>> = use_signal(|| None);
 
     let visible: Vec<ImageItem> = images
         .read()
@@ -67,12 +81,34 @@ fn App() -> Element {
     rsx! {
         style { {APP_CSS} }
         div { class: "app",
-            Toolbar { folder, images, selected, filter, loading }
+            Toolbar {
+                folder, images, selected, filter, loading, error_msg,
+                tagger_state, captioner_state,
+            }
+            ErrorBanner { error_msg }
             div { class: "workspace",
                 Grid { items: visible, selected }
                 DetailPanel { images, selected, tag_input }
             }
         }
+    }
+}
+
+#[component]
+fn ErrorBanner(mut error_msg: Signal<Option<String>>) -> Element {
+    let msg = error_msg.read().clone();
+    match msg {
+        None => rsx! {},
+        Some(m) => rsx! {
+            div { class: "error-banner",
+                span { "{m}" }
+                button {
+                    class: "dismiss",
+                    onclick: move |_| error_msg.set(None),
+                    "×"
+                }
+            }
+        },
     }
 }
 
@@ -83,6 +119,9 @@ fn Toolbar(
     mut selected: Signal<HashSet<PathBuf>>,
     mut filter: Signal<Filter>,
     mut loading: Signal<bool>,
+    error_msg: Signal<Option<String>>,
+    tagger_state: Signal<Option<Tagger>>,
+    captioner_state: Signal<Option<Captioner>>,
 ) -> Element {
     let on_open = move |_| {
         let Some(picked) = rfd::FileDialog::new().pick_folder() else {
@@ -94,23 +133,45 @@ fn Toolbar(
         f.set(Some(picked));
         images.set(loaded);
         selected.set(HashSet::new());
+        // Folder change invalidates lazily-loaded models (different config may
+        // point at different model paths).
+        let mut t = tagger_state;
+        t.set(None);
+        let mut c = captioner_state;
+        c.set(None);
         loading.set(false);
     };
 
+    let select_all_visible = move |_| {
+        let imgs = images.read();
+        let cur_filter = *filter.read();
+        let new_sel: HashSet<PathBuf> = imgs
+            .iter()
+            .filter(|i| cur_filter.matches(i))
+            .map(|i| i.path.clone())
+            .collect();
+        selected.set(new_sel);
+    };
+
+    let clear_selection = move |_| selected.set(HashSet::new());
+
     let folder_label = match folder.read().as_ref() {
-        Some(p) => p.display().to_string(),
+        Some(p) => p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(String::from)
+            .unwrap_or_else(|| p.display().to_string()),
         None => "(no folder)".to_string(),
     };
     let count = images.read().len();
     let sel_count = selected.read().len();
+    let has_sel = sel_count > 0;
+    let folder_set = folder.read().is_some();
 
     rsx! {
         div { class: "toolbar",
             button { onclick: on_open, "Open folder…" }
-            span { class: "muted", "{folder_label}" }
-            span { class: "spacer" }
-            if *loading.read() { span { class: "muted", "Loading…" } }
-            span { class: "muted", "{count} images · {sel_count} selected" }
+            span { class: "folder-name", "{folder_label}" }
             select {
                 value: "{filter.read().label()}",
                 onchange: move |evt| {
@@ -118,6 +179,8 @@ fn Toolbar(
                         "Untagged" => Filter::Untagged,
                         "Auto-tagged" => Filter::AutoTagged,
                         "No manual tags" => Filter::NoManual,
+                        "No caption" => Filter::NoCaption,
+                        "No booru" => Filter::NoBooru,
                         _ => Filter::All,
                     };
                     filter.set(f);
@@ -126,7 +189,39 @@ fn Toolbar(
                 option { value: "Untagged", "Untagged" }
                 option { value: "Auto-tagged", "Auto-tagged" }
                 option { value: "No manual tags", "No manual tags" }
+                option { value: "No caption", "No caption" }
+                option { value: "No booru", "No booru" }
             }
+            button {
+                class: "secondary",
+                onclick: select_all_visible,
+                disabled: !folder_set,
+                "Select visible"
+            }
+            button {
+                class: "secondary",
+                onclick: clear_selection,
+                disabled: !has_sel,
+                "Clear sel."
+            }
+            span { class: "spacer" }
+            button {
+                onclick: move |_| run_tagger(folder, images, selected, tagger_state, error_msg, loading),
+                disabled: !has_sel || *loading.read(),
+                "Run tagger"
+            }
+            button {
+                onclick: move |_| run_captioner(folder, images, selected, captioner_state, error_msg, loading),
+                disabled: !has_sel || *loading.read(),
+                "Run captioner"
+            }
+            button {
+                onclick: move |_| run_booru(images, selected, error_msg, loading),
+                disabled: !has_sel || *loading.read(),
+                "Fetch booru"
+            }
+            if *loading.read() { span { class: "muted", "Working…" } }
+            span { class: "muted", "{count} images · {sel_count} selected" }
         }
     }
 }
@@ -150,6 +245,8 @@ fn Thumb(item: ImageItem, mut selected: Signal<HashSet<PathBuf>>) -> Element {
     let is_selected = selected.read().contains(&item.path);
     let class = if is_selected { "thumb selected" } else { "thumb" };
     let auto_flag = if item.sidecar.is_auto_tagged() { "T" } else { " " };
+    let cap_flag = if item.sidecar.is_captioned() { "C" } else { " " };
+    let booru_flag = if item.sidecar.has_booru() { "B" } else { " " };
     let manual_flag = if !item.sidecar.manual_tags.is_empty() {
         "M"
     } else {
@@ -176,7 +273,7 @@ fn Thumb(item: ImageItem, mut selected: Signal<HashSet<PathBuf>>) -> Element {
                 }
             },
             img { src: "{item.thumbnail}" }
-            span { class: "thumb-status", "{auto_flag}{manual_flag}" }
+            span { class: "thumb-status", "{auto_flag}{cap_flag}{booru_flag}{manual_flag}" }
         }
     }
 }
@@ -194,16 +291,16 @@ fn DetailPanel(
         return rsx! {
             aside { class: "detail",
                 p { class: "muted", "Select one or more images to edit tags." }
+                p { class: "muted small",
+                    "Tip: type "
+                    code { "-tag" }
+                    " in the input to suppress an auto/booru tag (it stays in the data but is hidden from export)."
+                }
             }
         };
     }
 
     let imgs_snapshot = images.read().clone();
-    let single_item = if n == 1 {
-        imgs_snapshot.iter().find(|i| i.path == sel_paths[0]).cloned()
-    } else {
-        None
-    };
 
     let mut do_add = move |raw: String| {
         let tag = raw.trim().to_string();
@@ -222,51 +319,30 @@ fn DetailPanel(
         }
     };
 
-    let do_remove = move |tag: String| {
-        let sel = selected.read().clone();
-        let mut imgs = images.write();
-        for img in imgs.iter_mut() {
-            if !sel.contains(&img.path) {
-                continue;
-            }
-            if img.sidecar.remove_manual_tag(&tag) {
-                let _ = img.sidecar.save(&img.path);
-            }
-        }
-    };
-
     rsx! {
         aside { class: "detail",
             if n == 1 {
-                if let Some(item) = single_item.as_ref() {
-                    p { class: "muted",
-                        "{item.path.file_name().and_then(|s| s.to_str()).unwrap_or(\"\")}"
-                    }
+                if let Some(item) = imgs_snapshot.iter().find(|i| i.path == sel_paths[0]) {
+                    SingleDetail { item: item.clone(), images, selected, tag_input }
                 }
             } else {
-                p { class: "muted", "{n} images selected — bulk edit" }
-            }
-
-            div { class: "section-title", "Manual tags" }
-            ManualTagList {
-                items: imgs_snapshot.clone(),
-                selected_paths: sel_paths.clone(),
-                on_remove: EventHandler::new(do_remove),
+                BulkDetail {
+                    items: imgs_snapshot.clone(),
+                    selected_paths: sel_paths.clone(),
+                    images, tag_input,
+                }
             }
 
             div { class: "input-row",
                 input {
-                    placeholder: "Add tag…",
+                    placeholder: "tag, or -tag to suppress",
                     value: "{tag_input}",
                     oninput: move |evt| tag_input.set(evt.value()),
-                    onkeydown: {
-                        let mut do_add = do_add.clone();
-                        move |evt: KeyboardEvent| {
-                            if evt.key() == Key::Enter {
-                                let v = tag_input.read().clone();
-                                do_add(v);
-                                tag_input.set(String::new());
-                            }
+                    onkeydown: move |evt: KeyboardEvent| {
+                        if evt.key() == Key::Enter {
+                            let v = tag_input.read().clone();
+                            do_add(v);
+                            tag_input.set(String::new());
                         }
                     },
                 }
@@ -279,45 +355,163 @@ fn DetailPanel(
                     "Add"
                 }
             }
-
-            if let Some(item) = single_item {
-                div { class: "section-title", "Auto tags" }
-                if item.sidecar.auto_tags.is_empty() {
-                    p { class: "muted", "(none — run tagger to populate)" }
-                } else {
-                    div { class: "tag-list",
-                        for at in item.sidecar.auto_tags.iter() {
-                            span { class: "chip auto",
-                                "{at.tag}"
-                                span { class: "score", "{at.score:.2}" }
-                            }
-                        }
-                    }
-                }
-                if let Some(c) = item.sidecar.caption.as_ref() {
-                    div { class: "section-title", "Caption" }
-                    p { class: "caption", "{c}" }
-                }
-            }
         }
     }
 }
 
 #[component]
-fn ManualTagList(
+fn SingleDetail(
+    item: ImageItem,
+    images: Signal<Vec<ImageItem>>,
+    selected: Signal<HashSet<PathBuf>>,
+    tag_input: Signal<String>,
+) -> Element {
+    let _ = selected;
+    let _ = tag_input;
+    let path = item.path.clone();
+    let filename = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    let manual_positives: Vec<String> = item
+        .sidecar
+        .manual_positive_tags()
+        .map(|s| s.to_string())
+        .collect();
+
+    rsx! {
+        p { class: "filename", "{filename}" }
+
+        div { class: "section-title", "Tags" }
+        if manual_positives.is_empty() && item.sidecar.auto_tags.is_empty() && item.sidecar.booru_tags.is_empty() {
+            p { class: "muted", "(none yet — add manual or run tagger/booru)" }
+        } else {
+            div { class: "tag-list",
+                for tag in manual_positives.iter().cloned() {
+                    {
+                        let path_for = path.clone();
+                        let tag_for = tag.clone();
+                        rsx! {
+                            span { class: "chip manual",
+                                "{tag}"
+                                span {
+                                    class: "chip-x",
+                                    onclick: move |_| remove_manual_at(images, path_for.clone(), tag_for.clone()),
+                                    "×"
+                                }
+                            }
+                        }
+                    }
+                }
+                for at in item.sidecar.auto_tags.iter().cloned() {
+                    {
+                        let suppressed = item.sidecar.is_suppressed(&at.tag);
+                        let cls = if suppressed { "chip auto suppressed" } else { "chip auto" };
+                        let path_for = path.clone();
+                        let tag_for = at.tag.clone();
+                        rsx! {
+                            span { class: "{cls}",
+                                "{at.tag}"
+                                span { class: "score", "{at.score:.2}" }
+                                span {
+                                    class: "chip-x",
+                                    onclick: move |_| toggle_suppression_at(images, path_for.clone(), tag_for.clone()),
+                                    "×"
+                                }
+                            }
+                        }
+                    }
+                }
+                for bt in item.sidecar.booru_tags.iter().cloned() {
+                    {
+                        let suppressed = item.sidecar.is_suppressed(&bt.tag);
+                        let cls = if suppressed { "chip booru suppressed" } else { "chip booru" };
+                        let path_for = path.clone();
+                        let tag_for = bt.tag.clone();
+                        rsx! {
+                            span { class: "{cls}",
+                                "{bt.tag}"
+                                span { class: "src", "B" }
+                                span {
+                                    class: "chip-x",
+                                    onclick: move |_| toggle_suppression_at(images, path_for.clone(), tag_for.clone()),
+                                    "×"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(c) = item.sidecar.caption.as_ref() {
+            div { class: "section-title", "Caption" }
+            p { class: "caption", "{c}" }
+        }
+        if let Some(b) = item.sidecar.booru.as_ref() {
+            div { class: "section-title", "Booru" }
+            p { class: "muted small",
+                "{b.source}"
+                if let Some(id) = b.post_id { ": #{id}" }
+            }
+        }
+    }
+}
+
+fn remove_manual_at(mut images: Signal<Vec<ImageItem>>, path: PathBuf, tag: String) {
+    let mut imgs = images.write();
+    if let Some(img) = imgs.iter_mut().find(|i| i.path == path)
+        && img.sidecar.remove_manual_tag(&tag)
+    {
+        let _ = img.sidecar.save(&img.path);
+    }
+}
+
+fn toggle_suppression_at(mut images: Signal<Vec<ImageItem>>, path: PathBuf, tag: String) {
+    let mut imgs = images.write();
+    if let Some(img) = imgs.iter_mut().find(|i| i.path == path) {
+        let changed = if img.sidecar.is_suppressed(&tag) {
+            img.sidecar.unsuppress(&tag)
+        } else {
+            img.sidecar.suppress(&tag)
+        };
+        if changed {
+            let _ = img.sidecar.save(&img.path);
+        }
+    }
+}
+
+fn bulk_remove_manual(mut images: Signal<Vec<ImageItem>>, paths: Vec<PathBuf>, tag: String) {
+    let mut imgs = images.write();
+    for img in imgs.iter_mut() {
+        if !paths.contains(&img.path) {
+            continue;
+        }
+        if img.sidecar.remove_manual_tag(&tag) {
+            let _ = img.sidecar.save(&img.path);
+        }
+    }
+}
+
+#[component]
+fn BulkDetail(
     items: Vec<ImageItem>,
     selected_paths: Vec<PathBuf>,
-    on_remove: EventHandler<String>,
+    mut images: Signal<Vec<ImageItem>>,
+    tag_input: Signal<String>,
 ) -> Element {
+    let _ = tag_input;
     let n = selected_paths.len();
     let selected_items: Vec<&ImageItem> = items
         .iter()
         .filter(|i| selected_paths.contains(&i.path))
         .collect();
 
-    // Compute (tag, count) pairs preserving first-seen order
     let mut order: Vec<String> = Vec::new();
-    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     for item in &selected_items {
         for tag in &item.sidecar.manual_tags {
             if !counts.contains_key(tag) {
@@ -327,36 +521,234 @@ fn ManualTagList(
         }
     }
 
-    if order.is_empty() {
-        return rsx! { p { class: "muted", "(none)" } };
-    }
-
     rsx! {
-        div { class: "tag-list",
-            for tag in order.into_iter() {
-                {
-                    let count = counts[&tag];
-                    let label = if n > 1 && count < n {
-                        format!("{tag} ({count}/{n})")
-                    } else {
-                        tag.clone()
-                    };
-                    let tag_for_remove = tag.clone();
-                    rsx! {
-                        span { class: "chip manual",
-                            "{label}"
-                            span {
-                                class: "chip-x",
-                                onclick: move |_| on_remove.call(tag_for_remove.clone()),
-                                "×"
+        p { class: "muted", "{n} images selected — bulk edit" }
+        div { class: "section-title", "Manual entries (union)" }
+        if order.is_empty() {
+            p { class: "muted", "(none)" }
+        } else {
+            div { class: "tag-list",
+                for tag in order.into_iter() {
+                    {
+                        let count = counts[&tag];
+                        let label = if count < n {
+                            format!("{tag} ({count}/{n})")
+                        } else {
+                            tag.clone()
+                        };
+                        let cls = if tag.starts_with('-') { "chip negative" } else { "chip manual" };
+                        let paths_for = selected_paths.clone();
+                        let tag_for = tag.clone();
+                        rsx! {
+                            span { class: "{cls}",
+                                "{label}"
+                                span {
+                                    class: "chip-x",
+                                    onclick: move |_| bulk_remove_manual(images, paths_for.clone(), tag_for.clone()),
+                                    "×"
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        p { class: "muted small",
+            "Auto/booru tags hidden in bulk view; switch to single selection to edit per-tag."
+        }
     }
 }
+
+// ───────── Long-running operations ─────────
+
+fn run_tagger(
+    folder: Signal<Option<PathBuf>>,
+    mut images: Signal<Vec<ImageItem>>,
+    selected: Signal<HashSet<PathBuf>>,
+    mut tagger_state: Signal<Option<Tagger>>,
+    mut error_msg: Signal<Option<String>>,
+    mut loading: Signal<bool>,
+) {
+    let Some(folder_path) = folder.read().clone() else {
+        error_msg.set(Some("Open a folder first.".into()));
+        return;
+    };
+    let cfg = match ProjectConfig::load_or_default(&folder_path) {
+        Ok(c) => c,
+        Err(e) => {
+            error_msg.set(Some(e.to_string()));
+            return;
+        }
+    };
+    let Some((model_name, profile)) = cfg.resolve_tagger(None) else {
+        error_msg.set(Some(
+            "no [tagger.<name>] in anima-tagger.toml — set up a tagger profile first."
+                .into(),
+        ));
+        return;
+    };
+
+    let sel: Vec<PathBuf> = selected.read().iter().cloned().collect();
+    if sel.is_empty() {
+        return;
+    }
+
+    loading.set(true);
+
+    {
+        let mut t = tagger_state.write();
+        if t.is_none() {
+            match Tagger::from_profile(&profile) {
+                Ok(loaded) => *t = Some(loaded),
+                Err(e) => {
+                    error_msg.set(Some(format!("tagger load: {e}")));
+                    loading.set(false);
+                    return;
+                }
+            }
+        }
+    }
+
+    {
+        let mut t = tagger_state.write();
+        let tagger_inst = t.as_mut().unwrap();
+        let mut imgs = images.write();
+        let now = Utc::now();
+        for img in imgs.iter_mut() {
+            if !sel.contains(&img.path) {
+                continue;
+            }
+            match tagger_inst.tag_image(&img.path, profile.storage_threshold) {
+                Ok(tags) => {
+                    img.sidecar.auto_tags = tags;
+                    img.sidecar.tagger = Some(TaggerInfo {
+                        model: model_name.clone(),
+                        tagged_at: now,
+                    });
+                    let _ = img.sidecar.save(&img.path);
+                }
+                Err(e) => {
+                    error_msg.set(Some(format!("{}: {e}", img.path.display())));
+                }
+            }
+        }
+    }
+    loading.set(false);
+}
+
+fn run_captioner(
+    folder: Signal<Option<PathBuf>>,
+    mut images: Signal<Vec<ImageItem>>,
+    selected: Signal<HashSet<PathBuf>>,
+    mut captioner_state: Signal<Option<Captioner>>,
+    mut error_msg: Signal<Option<String>>,
+    mut loading: Signal<bool>,
+) {
+    let Some(folder_path) = folder.read().clone() else {
+        error_msg.set(Some("Open a folder first.".into()));
+        return;
+    };
+    let cfg = match ProjectConfig::load_or_default(&folder_path) {
+        Ok(c) => c,
+        Err(e) => {
+            error_msg.set(Some(e.to_string()));
+            return;
+        }
+    };
+    let Some((model_name, profile)) = cfg.resolve_captioner(None) else {
+        error_msg.set(Some(
+            "no [captioner.<name>] in anima-tagger.toml — set up a captioner profile first."
+                .into(),
+        ));
+        return;
+    };
+
+    let sel: Vec<PathBuf> = selected.read().iter().cloned().collect();
+    if sel.is_empty() {
+        return;
+    }
+
+    loading.set(true);
+
+    {
+        let mut c = captioner_state.write();
+        if c.is_none() {
+            match Captioner::from_profile(&profile) {
+                Ok(loaded) => *c = Some(loaded),
+                Err(e) => {
+                    error_msg.set(Some(format!("captioner load: {e}")));
+                    loading.set(false);
+                    return;
+                }
+            }
+        }
+    }
+
+    {
+        let mut c = captioner_state.write();
+        let captioner_inst = c.as_mut().unwrap();
+        let mut imgs = images.write();
+        let now = Utc::now();
+        for img in imgs.iter_mut() {
+            if !sel.contains(&img.path) {
+                continue;
+            }
+            match captioner_inst.caption_image(&img.path) {
+                Ok(caption) => {
+                    img.sidecar.caption = Some(caption);
+                    img.sidecar.captioner = Some(CaptionerInfo {
+                        model: model_name.clone(),
+                        captioned_at: now,
+                    });
+                    let _ = img.sidecar.save(&img.path);
+                }
+                Err(e) => {
+                    error_msg.set(Some(format!("{}: {e}", img.path.display())));
+                }
+            }
+        }
+    }
+    loading.set(false);
+}
+
+fn run_booru(
+    mut images: Signal<Vec<ImageItem>>,
+    selected: Signal<HashSet<PathBuf>>,
+    mut error_msg: Signal<Option<String>>,
+    mut loading: Signal<bool>,
+) {
+    let sel: Vec<PathBuf> = selected.read().iter().cloned().collect();
+    if sel.is_empty() {
+        return;
+    }
+    loading.set(true);
+
+    let client = BooruClient::danbooru();
+    {
+        let mut imgs = images.write();
+        for img in imgs.iter_mut() {
+            if !sel.contains(&img.path) {
+                continue;
+            }
+            match client.fetch_for_image(&img.path) {
+                Ok((tags, info)) => {
+                    img.sidecar.booru_tags = tags;
+                    img.sidecar.booru = Some(info);
+                    let _ = img.sidecar.save(&img.path);
+                }
+                Err(BooruError::NotFound(_)) => {
+                    // not on booru — silent skip, no error banner
+                }
+                Err(e) => {
+                    error_msg.set(Some(format!("{}: {e}", img.path.display())));
+                }
+            }
+        }
+    }
+    loading.set(false);
+}
+
+// ───────── I/O helpers ─────────
 
 fn load_folder(dir: &Path) -> Vec<ImageItem> {
     let mut out = Vec::new();
@@ -396,37 +788,42 @@ body {
     border-bottom: 1px solid #333;
     background: #252526;
     display: flex;
-    gap: 12px;
+    gap: 8px;
     align-items: center;
+    flex-wrap: wrap;
 }
 .toolbar .spacer { flex: 1; }
+.toolbar .folder-name {
+    color: #ccc; font-size: 12px;
+    max-width: 240px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .toolbar button, .input-row button {
-    background: #4a9eff;
-    color: white;
-    border: none;
-    padding: 6px 14px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 13px;
+    background: #4a9eff; color: white; border: none;
+    padding: 5px 12px; border-radius: 4px;
+    cursor: pointer; font-size: 12px;
 }
-.toolbar button:hover, .input-row button:hover { background: #5fa8ff; }
+.toolbar button:hover:not(:disabled), .input-row button:hover { background: #5fa8ff; }
+.toolbar button:disabled { background: #333; color: #666; cursor: not-allowed; }
+.toolbar button.secondary { background: #3a3a3a; color: #e6e6e6; }
+.toolbar button.secondary:hover:not(:disabled) { background: #4a4a4a; }
 .toolbar select, .input-row input {
-    background: #2a2a2a;
-    border: 1px solid #444;
-    color: #e6e6e6;
-    padding: 5px 8px;
-    border-radius: 4px;
-    font-size: 13px;
+    background: #2a2a2a; border: 1px solid #444; color: #e6e6e6;
+    padding: 4px 8px; border-radius: 4px; font-size: 12px;
 }
-.workspace {
-    display: flex;
-    flex: 1;
-    overflow: hidden;
+.error-banner {
+    background: #5a1f1f; color: #ffd0d0;
+    padding: 6px 12px; border-bottom: 1px solid #732;
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 12px;
 }
+.error-banner .dismiss {
+    background: transparent; color: #ffd0d0; border: none;
+    cursor: pointer; font-size: 16px; padding: 0 6px;
+}
+.workspace { display: flex; flex: 1; overflow: hidden; }
 .grid {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px;
+    flex: 1; overflow-y: auto; padding: 12px;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 8px;
@@ -435,58 +832,58 @@ body {
 .grid.empty { display: flex; align-items: center; justify-content: center; }
 .thumb {
     aspect-ratio: 1;
-    border: 2px solid transparent;
-    border-radius: 4px;
-    overflow: hidden;
-    cursor: pointer;
-    background: #2a2a2a;
-    position: relative;
-    user-select: none;
+    border: 2px solid transparent; border-radius: 4px;
+    overflow: hidden; cursor: pointer;
+    background: #2a2a2a; position: relative; user-select: none;
 }
 .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
 .thumb.selected { border-color: #4a9eff; }
 .thumb-status {
     position: absolute; top: 4px; right: 4px;
     font-size: 10px;
-    background: rgba(0,0,0,0.65);
-    color: #fff;
-    padding: 2px 5px;
-    border-radius: 2px;
-    font-family: ui-monospace, monospace;
-    white-space: pre;
+    background: rgba(0,0,0,0.65); color: #fff;
+    padding: 2px 5px; border-radius: 2px;
+    font-family: ui-monospace, monospace; white-space: pre;
 }
 .detail {
-    width: 320px;
+    width: 340px;
     border-left: 1px solid #333;
     overflow-y: auto;
     padding: 12px;
     background: #252526;
+    display: flex; flex-direction: column;
 }
+.filename { font-family: ui-monospace, monospace; font-size: 11px; color: #aaa; margin: 0 0 4px; }
 .section-title {
-    font-size: 11px;
-    text-transform: uppercase;
-    color: #999;
-    margin-top: 14px;
-    margin-bottom: 4px;
-    letter-spacing: 0.04em;
+    font-size: 11px; text-transform: uppercase; color: #999;
+    margin-top: 12px; margin-bottom: 4px; letter-spacing: 0.04em;
 }
 .tag-list { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip {
-    padding: 3px 8px;
-    border-radius: 12px;
+    padding: 3px 7px; border-radius: 12px;
     font-size: 12px;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
+    display: inline-flex; align-items: center; gap: 3px;
     line-height: 1.4;
 }
 .chip.manual { background: #2d4a6e; color: #cfe3ff; }
+.chip.negative { background: #5a2d2d; color: #ffd0d0; }
 .chip.auto { background: #3a3a3a; color: #ccc; }
+.chip.booru { background: #2d5a3a; color: #cfe5d0; }
+.chip.suppressed {
+    text-decoration: line-through;
+    opacity: 0.55;
+}
 .chip-x { cursor: pointer; opacity: 0.55; padding: 0 2px; font-weight: bold; }
 .chip-x:hover { opacity: 1; }
 .score { color: #888; font-size: 10px; margin-left: 2px; }
-.input-row { display: flex; gap: 6px; margin-top: 8px; }
+.src { color: #888; font-size: 10px; margin-left: 2px; }
+.input-row { display: flex; gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #333; }
 .input-row input { flex: 1; }
 .muted { color: #999; font-size: 12px; margin: 0; }
+.muted.small { font-size: 11px; }
 .caption { color: #ddd; font-size: 12px; line-height: 1.4; margin: 4px 0; }
+code {
+    background: #2a2a2a; padding: 1px 4px; border-radius: 3px;
+    font-family: ui-monospace, monospace; font-size: 11px;
+}
 "#;

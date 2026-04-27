@@ -1,0 +1,13 @@
+[package]
+name = "anima-tagger-booru"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anima-tagger-core = { workspace = true }
+serde = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+ureq = { workspace = true }
+md5 = { workspace = true }
