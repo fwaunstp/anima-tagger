@@ -15,9 +15,13 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub default_tagger: Option<String>,
     #[serde(default)]
+    pub default_captioner: Option<String>,
+    #[serde(default)]
     pub export: BTreeMap<String, ExportProfile>,
     #[serde(default)]
     pub tagger: BTreeMap<String, TaggerProfile>,
+    #[serde(default)]
+    pub captioner: BTreeMap<String, CaptionerProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +40,31 @@ fn default_input_size() -> u32 {
 
 fn default_storage_threshold() -> f32 {
     0.10
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptionerProfile {
+    /// Directory containing `vision_encoder.onnx`, `embed_tokens.onnx`,
+    /// `encoder_model.onnx`, `decoder_model.onnx`, and `tokenizer.json`.
+    pub model_dir: PathBuf,
+    #[serde(default = "default_caption_prompt")]
+    pub prompt: String,
+    #[serde(default = "default_caption_input_size")]
+    pub input_size: u32,
+    #[serde(default = "default_max_new_tokens")]
+    pub max_new_tokens: usize,
+}
+
+fn default_caption_prompt() -> String {
+    "<MORE_DETAILED_CAPTION>".to_string()
+}
+
+fn default_caption_input_size() -> u32 {
+    768
+}
+
+fn default_max_new_tokens() -> usize {
+    1024
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,8 +129,10 @@ impl Default for ProjectConfig {
         Self {
             default_profile: Some(DEFAULT_PROFILE_NAME.to_string()),
             default_tagger: None,
+            default_captioner: None,
             export,
             tagger: BTreeMap::new(),
+            captioner: BTreeMap::new(),
         }
     }
 }
@@ -162,6 +193,14 @@ impl ProjectConfig {
             .map(str::to_string)
             .or_else(|| self.default_tagger.clone())?;
         let profile = self.tagger.get(&key)?.clone();
+        Some((key, profile))
+    }
+
+    pub fn resolve_captioner(&self, name: Option<&str>) -> Option<(String, CaptionerProfile)> {
+        let key = name
+            .map(str::to_string)
+            .or_else(|| self.default_captioner.clone())?;
+        let profile = self.captioner.get(&key)?.clone();
         Some((key, profile))
     }
 }

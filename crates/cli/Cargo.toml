@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 anima-tagger-core = { workspace = true }
 anima-tagger-tagger = { workspace = true }
+anima-tagger-captioner = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }

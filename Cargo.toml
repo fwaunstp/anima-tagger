@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/tagger", "crates/cli", "crates/gui"]
+members = ["crates/core", "crates/tagger", "crates/captioner", "crates/cli", "crates/gui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,8 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 anima-tagger-core = { path = "crates/core" }
 anima-tagger-tagger = { path = "crates/tagger" }
+anima-tagger-captioner = { path = "crates/captioner" }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 serde = { version = "1", features = ["derive"] }
 ron = "0.8"
 toml = "0.8"

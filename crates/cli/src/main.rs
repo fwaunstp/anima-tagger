@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
+use anima_tagger_captioner::Captioner;
 use anima_tagger_core::config::ProjectConfig;
 use anima_tagger_core::export;
-use anima_tagger_core::sidecar::{Sidecar, TaggerInfo};
+use anima_tagger_core::sidecar::{CaptionerInfo, Sidecar, TaggerInfo};
 use anima_tagger_core::walk::iter_images;
 use anima_tagger_tagger::Tagger;
 use anyhow::{Context, Result};
@@ -37,6 +38,10 @@ enum Command {
     /// Run the automatic captioner over images in a directory.
     Caption {
         dir: PathBuf,
+        /// Name of a `[captioner.<name>]` profile in `anima-tagger.toml`.
+        #[arg(long)]
+        model: Option<String>,
+        /// Re-caption images that already have a caption record.
         #[arg(long)]
         force: bool,
     },
@@ -61,9 +66,7 @@ fn main() -> Result<()> {
             force,
             threshold,
         } => cmd_tag(dir, model, force, threshold),
-        Command::Caption { .. } => {
-            anyhow::bail!("automatic captioner not yet implemented");
-        }
+        Command::Caption { dir, model, force } => cmd_caption(dir, model, force),
         Command::Export {
             dir,
             profile,
@@ -118,6 +121,50 @@ fn cmd_tag(
         println!("tagged {} ({n} tags)", image.display());
     }
     println!("done: {tagged} tagged, {skipped} skipped (use --force to retag)");
+    Ok(())
+}
+
+fn cmd_caption(dir: PathBuf, model_name: Option<String>, force: bool) -> Result<()> {
+    let cfg = ProjectConfig::load_or_default(&dir)
+        .with_context(|| format!("loading config in {}", dir.display()))?;
+    let (resolved_name, profile) = cfg
+        .resolve_captioner(model_name.as_deref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no captioner profile configured. Add a [captioner.<name>] section to \
+                 anima-tagger.toml with model_dir (containing vision_encoder.onnx, \
+                 embed_tokens.onnx, encoder_model.onnx, decoder_model.onnx, tokenizer.json) \
+                 and either pass --model <name> or set default_captioner."
+            )
+        })?;
+
+    eprintln!(
+        "loading captioner `{resolved_name}` from {} …",
+        profile.model_dir.display()
+    );
+    let mut captioner = Captioner::from_profile(&profile)?;
+    eprintln!("captioner ready");
+
+    let mut captioned = 0usize;
+    let mut skipped = 0usize;
+    for image in iter_images(&dir) {
+        let mut sc = Sidecar::load_or_default(&image)?;
+        if !force && sc.is_captioned() {
+            skipped += 1;
+            continue;
+        }
+        let caption = captioner.caption_image(&image)?;
+        let preview: String = caption.chars().take(60).collect();
+        sc.caption = Some(caption);
+        sc.captioner = Some(CaptionerInfo {
+            model: resolved_name.clone(),
+            captioned_at: Utc::now(),
+        });
+        sc.save(&image)?;
+        captioned += 1;
+        println!("captioned {} — \"{preview}…\"", image.display());
+    }
+    println!("done: {captioned} captioned, {skipped} skipped (use --force to recaption)");
     Ok(())
 }
 
