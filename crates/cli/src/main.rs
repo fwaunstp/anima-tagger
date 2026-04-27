@@ -64,6 +64,18 @@ enum Command {
         #[arg(long)]
         threshold: Option<f32>,
     },
+    /// Write a kohya-ss/sd-scripts fine-tune metadata JSON containing tags +
+    /// captions for every image with a sidecar.
+    Metadata {
+        dir: PathBuf,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        threshold: Option<f32>,
+        /// Output path (default: `<dir>/meta.json`).
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Show sidecar status for images in a directory.
     Status { dir: PathBuf },
 }
@@ -84,6 +96,12 @@ fn main() -> Result<()> {
             profile,
             threshold,
         } => cmd_export(dir, profile, threshold),
+        Command::Metadata {
+            dir,
+            profile,
+            threshold,
+            output,
+        } => cmd_metadata(dir, profile, threshold, output),
         Command::Status { dir } => cmd_status(dir),
     }
 }
@@ -242,6 +260,71 @@ fn cmd_export(dir: PathBuf, profile_name: Option<String>, threshold: Option<f32>
         written += 1;
     }
     println!("done: {written} written, {skipped} skipped (no sidecar)");
+    Ok(())
+}
+
+fn cmd_metadata(
+    dir: PathBuf,
+    profile_name: Option<String>,
+    threshold: Option<f32>,
+    output: Option<PathBuf>,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    let cfg = ProjectConfig::load_or_default(&dir)
+        .with_context(|| format!("loading config in {}", dir.display()))?;
+    let mut profile = cfg.resolve_profile(profile_name.as_deref());
+    if let Some(t) = threshold {
+        profile.threshold = t;
+    }
+    // sd-scripts will shuffle at training time; metadata stays stable for diffability.
+    profile.shuffle = false;
+
+    let mut meta: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut count = 0usize;
+    let mut skipped = 0usize;
+
+    for image in iter_images(&dir) {
+        let sidecar = match Sidecar::load(&image)? {
+            Some(s) => s,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let tags = anima_tagger_core::export::build_tags(&sidecar, &profile);
+        let mut entry = serde_json::Map::new();
+        if !tags.is_empty() {
+            entry.insert(
+                "tags".to_string(),
+                serde_json::Value::String(tags.join(", ")),
+            );
+        }
+        if let Some(cap) = sidecar.caption.as_ref() {
+            entry.insert(
+                "caption".to_string(),
+                serde_json::Value::String(cap.clone()),
+            );
+        }
+        if entry.is_empty() {
+            continue;
+        }
+        let key = image
+            .canonicalize()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| image.display().to_string());
+        meta.insert(key, serde_json::Value::Object(entry));
+        count += 1;
+    }
+
+    let output_path = output.unwrap_or_else(|| dir.join("meta.json"));
+    let json = serde_json::to_string_pretty(&meta)?;
+    std::fs::write(&output_path, json)
+        .with_context(|| format!("writing {}", output_path.display()))?;
+    println!(
+        "wrote {} ({count} entries, {skipped} images without sidecar skipped)",
+        output_path.display()
+    );
     Ok(())
 }
 

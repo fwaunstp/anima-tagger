@@ -75,6 +75,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "serde_json",
 ]
 
 [[package]]

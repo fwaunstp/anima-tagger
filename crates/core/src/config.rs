@@ -86,7 +86,9 @@ fn default_threshold() -> f32 {
 }
 
 fn default_shuffle() -> bool {
-    true
+    // sd-scripts and most modern LoRA trainers shuffle tags themselves at
+    // training time, so don't shuffle on export by default.
+    false
 }
 
 impl Default for ExportProfile {
