@@ -13,7 +13,29 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub default_profile: Option<String>,
     #[serde(default)]
+    pub default_tagger: Option<String>,
+    #[serde(default)]
     pub export: BTreeMap<String, ExportProfile>,
+    #[serde(default)]
+    pub tagger: BTreeMap<String, TaggerProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaggerProfile {
+    pub model_path: PathBuf,
+    pub tags_path: PathBuf,
+    #[serde(default = "default_input_size")]
+    pub input_size: u32,
+    #[serde(default = "default_storage_threshold")]
+    pub storage_threshold: f32,
+}
+
+fn default_input_size() -> u32 {
+    448
+}
+
+fn default_storage_threshold() -> f32 {
+    0.10
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,7 +99,9 @@ impl Default for ProjectConfig {
         export.insert("plain".to_string(), ExportProfile::default());
         Self {
             default_profile: Some(DEFAULT_PROFILE_NAME.to_string()),
+            default_tagger: None,
             export,
+            tagger: BTreeMap::new(),
         }
     }
 }
@@ -129,5 +153,15 @@ impl ProjectConfig {
             return p.clone();
         }
         ExportProfile::default()
+    }
+
+    /// Resolve a tagger profile by explicit name or fall back to `default_tagger`.
+    /// Returns None if neither selects a valid profile (i.e. the user must configure one).
+    pub fn resolve_tagger(&self, name: Option<&str>) -> Option<(String, TaggerProfile)> {
+        let key = name
+            .map(str::to_string)
+            .or_else(|| self.default_tagger.clone())?;
+        let profile = self.tagger.get(&key)?.clone();
+        Some((key, profile))
     }
 }

@@ -1,0 +1,14 @@
+[package]
+name = "anima-tagger-tagger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anima-tagger-core = { workspace = true }
+ort = { workspace = true }
+ndarray = { workspace = true }
+image = { workspace = true }
+csv = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

@@ -2,9 +2,11 @@ use std::path::PathBuf;
 
 use anima_tagger_core::config::ProjectConfig;
 use anima_tagger_core::export;
-use anima_tagger_core::sidecar::Sidecar;
+use anima_tagger_core::sidecar::{Sidecar, TaggerInfo};
 use anima_tagger_core::walk::iter_images;
+use anima_tagger_tagger::Tagger;
 use anyhow::{Context, Result};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -22,8 +24,15 @@ enum Command {
     /// Run the automatic tagger over images in a directory.
     Tag {
         dir: PathBuf,
+        /// Name of a `[tagger.<name>]` profile in `anima-tagger.toml`.
+        #[arg(long)]
+        model: Option<String>,
+        /// Re-tag images that already have an auto-tag record.
         #[arg(long)]
         force: bool,
+        /// Override the storage threshold from the tagger profile.
+        #[arg(long)]
+        threshold: Option<f32>,
     },
     /// Run the automatic captioner over images in a directory.
     Caption {
@@ -46,9 +55,12 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Tag { .. } => {
-            anyhow::bail!("automatic tagger not yet implemented (next iteration)");
-        }
+        Command::Tag {
+            dir,
+            model,
+            force,
+            threshold,
+        } => cmd_tag(dir, model, force, threshold),
         Command::Caption { .. } => {
             anyhow::bail!("automatic captioner not yet implemented");
         }
@@ -59,6 +71,54 @@ fn main() -> Result<()> {
         } => cmd_export(dir, profile, threshold),
         Command::Status { dir } => cmd_status(dir),
     }
+}
+
+fn cmd_tag(
+    dir: PathBuf,
+    model_name: Option<String>,
+    force: bool,
+    threshold_override: Option<f32>,
+) -> Result<()> {
+    let cfg = ProjectConfig::load_or_default(&dir)
+        .with_context(|| format!("loading config in {}", dir.display()))?;
+    let (resolved_name, profile) = cfg
+        .resolve_tagger(model_name.as_deref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no tagger profile configured. Add a [tagger.<name>] section to anima-tagger.toml \
+                 with model_path and tags_path, and either pass --model <name> or set default_tagger."
+            )
+        })?;
+    let threshold = threshold_override.unwrap_or(profile.storage_threshold);
+
+    eprintln!(
+        "loading model `{resolved_name}` from {} …",
+        profile.model_path.display()
+    );
+    let mut tagger = Tagger::from_profile(&profile)?;
+    eprintln!("model ready ({} tags)", tagger.num_tags());
+
+    let mut tagged = 0usize;
+    let mut skipped = 0usize;
+    for image in iter_images(&dir) {
+        let mut sc = Sidecar::load_or_default(&image)?;
+        if !force && sc.is_auto_tagged() {
+            skipped += 1;
+            continue;
+        }
+        let tags = tagger.tag_image(&image, threshold)?;
+        let n = tags.len();
+        sc.auto_tags = tags;
+        sc.tagger = Some(TaggerInfo {
+            model: resolved_name.clone(),
+            tagged_at: Utc::now(),
+        });
+        sc.save(&image)?;
+        tagged += 1;
+        println!("tagged {} ({n} tags)", image.display());
+    }
+    println!("done: {tagged} tagged, {skipped} skipped (use --force to retag)");
+    Ok(())
 }
 
 fn cmd_export(dir: PathBuf, profile_name: Option<String>, threshold: Option<f32>) -> Result<()> {
