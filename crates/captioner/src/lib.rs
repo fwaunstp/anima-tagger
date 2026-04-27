@@ -58,10 +58,10 @@ pub struct Captioner {
 impl Captioner {
     pub fn from_profile(profile: &CaptionerProfile) -> Result<Self, CaptionerError> {
         let dir = &profile.model_dir;
-        let vision = build_session(&dir.join("vision_encoder.onnx"))?;
-        let embed = build_session(&dir.join("embed_tokens.onnx"))?;
-        let encoder = build_session(&dir.join("encoder_model.onnx"))?;
-        let decoder = build_session(&dir.join("decoder_model.onnx"))?;
+        let vision = build_session(&dir.join("vision_encoder.onnx"), "vision_encoder")?;
+        let embed = build_session(&dir.join("embed_tokens.onnx"), "embed_tokens")?;
+        let encoder = build_session(&dir.join("encoder_model.onnx"), "encoder_model")?;
+        let decoder = build_session(&dir.join("decoder_model.onnx"), "decoder_model")?;
 
         let tokenizer_path = dir.join("tokenizer.json");
         let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
@@ -92,9 +92,10 @@ impl Captioner {
         let pixel_data = preprocess_florence2(&img, self.input_size);
         let s = self.input_size as i64;
         let vision_input = Tensor::from_array(([1_i64, 3, s, s], pixel_data))?;
-        let vision_outputs = self.vision.run(ort::inputs! {
-            "pixel_values" => vision_input,
-        })?;
+        let vision_outputs = self
+            .vision
+            .run(ort::inputs![vision_input])
+            .map_err(|e| CaptionerError::Ort(format!("vision_encoder: {e}")))?;
         let (v, d, vision_data) = {
             let (shape, data) = vision_outputs[0].try_extract_tensor::<f32>()?;
             check_rank(shape, 3, "vision_encoder output")?;
@@ -106,9 +107,10 @@ impl Captioner {
         let t = self.prompt_token_ids.len();
         let prompt_input =
             Tensor::from_array(([1_i64, t as i64], self.prompt_token_ids.clone()))?;
-        let embed_outputs = self.embed.run(ort::inputs! {
-            "input_ids" => prompt_input,
-        })?;
+        let embed_outputs = self
+            .embed
+            .run(ort::inputs![prompt_input])
+            .map_err(|e| CaptionerError::Ort(format!("embed_tokens: {e}")))?;
         let embed_data = {
             let (shape, data) = embed_outputs[0].try_extract_tensor::<f32>()?;
             check_rank(shape, 3, "embed_tokens output")?;
@@ -133,10 +135,13 @@ impl Captioner {
             Tensor::from_array(([1_i64, (v + t) as i64], attention_mask.clone()))?;
 
         // 4. Text encoder
-        let encoder_outputs = self.encoder.run(ort::inputs! {
-            "inputs_embeds" => concat_input,
-            "attention_mask" => mask_input,
-        })?;
+        let encoder_outputs = self
+            .encoder
+            .run(ort::inputs! {
+                "inputs_embeds" => concat_input,
+                "attention_mask" => mask_input,
+            })
+            .map_err(|e| CaptionerError::Ort(format!("encoder_model: {e}")))?;
         let (enc_seq, enc_dim, enc_data) = {
             let (shape, data) = encoder_outputs[0].try_extract_tensor::<f32>()?;
             check_rank(shape, 3, "encoder_model output")?;
@@ -159,11 +164,14 @@ impl Captioner {
             let dec_ids_tensor =
                 Tensor::from_array(([1_i64, cur_len as i64], decoder_ids.clone()))?;
 
-            let dec_outputs = self.decoder.run(ort::inputs! {
-                "encoder_hidden_states" => enc_state_tensor,
-                "encoder_attention_mask" => enc_mask_tensor,
-                "input_ids" => dec_ids_tensor,
-            })?;
+            let dec_outputs = self
+                .decoder
+                .run(ort::inputs! {
+                    "encoder_hidden_states" => enc_state_tensor,
+                    "encoder_attention_mask" => enc_mask_tensor,
+                    "input_ids" => dec_ids_tensor,
+                })
+                .map_err(|e| CaptionerError::Ort(format!("decoder_model: {e}")))?;
             let next_id = {
                 let (shape, data) = dec_outputs[0].try_extract_tensor::<f32>()?;
                 check_rank(shape, 3, "decoder_model output")?;
@@ -189,11 +197,16 @@ impl Captioner {
     }
 }
 
-fn build_session(path: &Path) -> Result<Session, CaptionerError> {
+fn build_session(path: &Path, label: &str) -> Result<Session, CaptionerError> {
     let bytes = std::fs::read(path)?;
     let session = Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .commit_from_memory(&bytes)?;
+    let inputs: Vec<&str> = session.inputs().iter().map(|i| i.name()).collect();
+    let outputs: Vec<&str> = session.outputs().iter().map(|o| o.name()).collect();
+    eprintln!(
+        "[captioner:{label}] inputs={inputs:?} outputs={outputs:?}"
+    );
     Ok(session)
 }
 
