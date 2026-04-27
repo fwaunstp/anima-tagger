@@ -9,6 +9,7 @@
 //! For caption tasks (~50–200 tokens) on CPU this is workable; KV cache can be
 //! wired in later by switching to `decoder_model_merged.onnx`.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anima_tagger_core::config::CaptionerProfile;
@@ -74,20 +75,24 @@ impl Captioner {
             CaptionerError::Tokenizer(format!("loading {}: {e}", tokenizer_path.display()))
         })?;
 
-        // Build the prompt token sequence by direct vocab lookup, sidestepping
-        // the rust `tokenizers` crate's habit of BPE-subtokenizing added
-        // special tokens via the normal encode path. Florence-2 caption tasks
-        // are pure task tokens with no extra text, so [<s>, task, </s>] is
-        // exact.
-        let bos_id = tokenizer.token_to_id("<s>").unwrap_or(0);
-        let eos_id = tokenizer.token_to_id("</s>").unwrap_or(2);
-        let task_id = tokenizer.token_to_id(profile.prompt.as_str()).ok_or_else(|| {
-            CaptionerError::Tokenizer(format!(
-                "task token {:?} not in tokenizer vocabulary — check tokenizer.json added_tokens \
-                 for the exact spelling (e.g. `<MORE_DETAILED_CAPTION>`).",
-                profile.prompt
-            ))
-        })?;
+        // Florence-2 task tokens (e.g. `<MORE_DETAILED_CAPTION>`) live in the
+        // companion `added_tokens.json` rather than inside `tokenizer.json`,
+        // so the rust tokenizers crate's encode path BPE-subtokenizes them
+        // (one round of debugging confirmed this empirically). Resolve via a
+        // small fallback that consults `added_tokens.json` when the main
+        // tokenizer doesn't know the token.
+        let extra_added = load_added_tokens(dir);
+        let bos_id = resolve_token_id(&tokenizer, &extra_added, "<s>").unwrap_or(0);
+        let eos_id = resolve_token_id(&tokenizer, &extra_added, "</s>").unwrap_or(2);
+        let task_id = resolve_token_id(&tokenizer, &extra_added, profile.prompt.as_str())
+            .ok_or_else(|| {
+                let known: Vec<&String> = extra_added.keys().collect();
+                CaptionerError::Tokenizer(format!(
+                    "task token {:?} not found in tokenizer.json or added_tokens.json. \
+                     Tokens present in added_tokens.json: {:?}",
+                    profile.prompt, known
+                ))
+            })?;
         let prompt_token_ids: Vec<i64> = vec![bos_id as i64, task_id as i64, eos_id as i64];
         eprintln!(
             "[captioner:prompt] {:?} -> ids={:?} (bos={bos_id} task={task_id} eos={eos_id})",
@@ -263,6 +268,27 @@ impl Captioner {
         eprintln!("[captioner:decoded] {caption:?}");
         Ok(caption.trim().to_string())
     }
+}
+
+/// Read `added_tokens.json` from the model directory if present.
+/// Returns an empty map on missing/malformed file — the caller can still
+/// succeed if the main tokenizer.json knows the requested token.
+fn load_added_tokens(dir: &Path) -> HashMap<String, u32> {
+    let path = dir.join("added_tokens.json");
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&s).unwrap_or_default()
+}
+
+fn resolve_token_id(
+    tokenizer: &Tokenizer,
+    extra_added: &HashMap<String, u32>,
+    name: &str,
+) -> Option<u32> {
+    tokenizer
+        .token_to_id(name)
+        .or_else(|| extra_added.get(name).copied())
 }
 
 fn build_session(path: &Path, label: &str) -> Result<Session, CaptionerError> {
