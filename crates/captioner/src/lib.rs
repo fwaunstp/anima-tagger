@@ -74,22 +74,25 @@ impl Captioner {
             CaptionerError::Tokenizer(format!("loading {}: {e}", tokenizer_path.display()))
         })?;
 
-        let encoding = tokenizer
-            .encode(profile.prompt.as_str(), true)
-            .map_err(|e| CaptionerError::Tokenizer(e.to_string()))?;
-        let prompt_token_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
-        let prompt_surfaces: Vec<&str> = encoding.get_tokens().iter().map(|s| s.as_str()).collect();
+        // Build the prompt token sequence by direct vocab lookup, sidestepping
+        // the rust `tokenizers` crate's habit of BPE-subtokenizing added
+        // special tokens via the normal encode path. Florence-2 caption tasks
+        // are pure task tokens with no extra text, so [<s>, task, </s>] is
+        // exact.
+        let bos_id = tokenizer.token_to_id("<s>").unwrap_or(0);
+        let eos_id = tokenizer.token_to_id("</s>").unwrap_or(2);
+        let task_id = tokenizer.token_to_id(profile.prompt.as_str()).ok_or_else(|| {
+            CaptionerError::Tokenizer(format!(
+                "task token {:?} not in tokenizer vocabulary — check tokenizer.json added_tokens \
+                 for the exact spelling (e.g. `<MORE_DETAILED_CAPTION>`).",
+                profile.prompt
+            ))
+        })?;
+        let prompt_token_ids: Vec<i64> = vec![bos_id as i64, task_id as i64, eos_id as i64];
         eprintln!(
-            "[captioner:prompt] {:?} -> ids={:?} surfaces={:?}",
-            profile.prompt, prompt_token_ids, prompt_surfaces
+            "[captioner:prompt] {:?} -> ids={:?} (bos={bos_id} task={task_id} eos={eos_id})",
+            profile.prompt, prompt_token_ids
         );
-        if prompt_token_ids.len() > 5 {
-            eprintln!(
-                "[captioner:prompt] WARNING: prompt encoded into {} tokens — task token may not be \
-                 recognized as a single special token. Caption will likely degenerate.",
-                prompt_token_ids.len()
-            );
-        }
 
         Ok(Self {
             vision,
