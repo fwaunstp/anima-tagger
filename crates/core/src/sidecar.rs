@@ -16,7 +16,7 @@ pub mod category {
     pub const RATING: &str = "rating";
 }
 
-pub const SIDECAR_SUFFIX: &str = ".ron";
+pub const SIDECAR_EXTENSION: &str = "ron";
 
 /// Manual entries beginning with this character are treated as suppression
 /// markers (e.g. `-watermark` removes any auto/booru tag with stem `watermark`
@@ -105,9 +105,7 @@ pub enum SidecarError {
 }
 
 pub fn sidecar_path_for(image: &Path) -> PathBuf {
-    let mut s = image.as_os_str().to_owned();
-    s.push(SIDECAR_SUFFIX);
-    PathBuf::from(s)
+    image.with_extension(SIDECAR_EXTENSION)
 }
 
 fn pretty_config() -> PrettyConfig {

@@ -54,7 +54,7 @@ one piece.
 
 ## Data model
 
-### Sidecar (`<image>.png.ron`)
+### Sidecar (`<basename>.ron`)
 
 Every image gets a sibling RON file holding everything we know about it.
 
