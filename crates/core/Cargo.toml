@@ -12,3 +12,4 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 walkdir = { workspace = true }
 rand = { workspace = true }
+hf-hub = { workspace = true }

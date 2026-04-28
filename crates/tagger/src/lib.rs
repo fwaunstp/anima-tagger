@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use anima_tagger_core::config::TaggerProfile;
+use anima_tagger_core::hub;
 use anima_tagger_core::sidecar::AutoTag;
 use image::DynamicImage;
 use image::imageops::FilterType;
@@ -29,8 +30,10 @@ pub enum TaggerError {
         #[source]
         source: csv::Error,
     },
+    #[error("hub: {0}")]
+    Hub(#[from] hub::HubError),
     #[error(
-        "model output count ({actual}) does not match tag dictionary size ({expected}) — model and tags_path are mismatched"
+        "model output count ({actual}) does not match tag dictionary size ({expected}) — model and tag CSV are mismatched"
     )]
     OutputMismatch { expected: usize, actual: usize },
 }
@@ -119,11 +122,21 @@ pub struct Tagger {
 
 impl Tagger {
     pub fn from_profile(profile: &TaggerProfile) -> Result<Self, TaggerError> {
-        let bytes = std::fs::read(&profile.model_path)?;
+        // SmilingWolf's WD14 repos lay out `model.onnx` and `selected_tags.csv`
+        // at the root, so the file list is the same across model variants.
+        let files = hub::fetch_files(
+            &profile.repo,
+            profile.revision.as_deref(),
+            &["model.onnx", "selected_tags.csv"],
+        )?;
+        let model_path = &files[0];
+        let tags_path = &files[1];
+
+        let bytes = std::fs::read(model_path)?;
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .commit_from_memory(&bytes)?;
-        let tags = load_tags(&profile.tags_path)?;
+        let tags = load_tags(tags_path)?;
         Ok(Self {
             session,
             tags,

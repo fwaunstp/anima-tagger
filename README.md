@@ -119,12 +119,15 @@ scene context). On export the merged caption is `"{manual} {auto}"`.
 
 ## Configuration: `anima-tagger.toml`
 
-Lives in the dataset directory. Everything is optional except tagger /
-captioner profiles you actually intend to invoke.
+Lives in the dataset directory. **Entirely optional** — with no config file at
+all, the CLI/GUI fall back to built-in tagger and captioner profiles
+(`SmilingWolf/wd-eva02-large-tagger-v3` and `onnx-community/Florence-2-base-ft`),
+auto-downloaded into the shared HuggingFace cache (`~/.cache/huggingface/hub`)
+on first run.
 
 ```toml
-default_profile  = "anima"
-default_tagger   = "wd-eva02-large-v3"
+default_profile   = "anima"
+default_tagger    = "wd-eva02-large-v3"
 default_captioner = "florence2-base"
 
 # How tags are formatted/filtered when written to .txt or meta.json.
@@ -138,23 +141,31 @@ category_prefixes = { artist = "@" }   # ANIMA's `@artist_name` convention
 threshold = 0.35
 shuffle = false
 
-# Tagger profile — points at WD14-family ONNX + the matching CSV.
+# Tagger profile — HuggingFace repo holding model.onnx + selected_tags.csv.
 [tagger.wd-eva02-large-v3]
-model_path = "/path/to/wd-eva02-large-tagger-v3/model.onnx"
-tags_path  = "/path/to/wd-eva02-large-tagger-v3/selected_tags.csv"
+repo = "SmilingWolf/wd-eva02-large-tagger-v3"
+# revision = "main"                # optional; pins a branch/tag/commit
 input_size = 448
 storage_threshold = 0.10           # filter tags below this when *storing*
 
-# Captioner profile — model_dir holds the 4 ONNX submodels + tokenizer.json.
+# Captioner profile — HuggingFace repo with the Florence-2 ONNX layout
+# (`onnx/{vision_encoder,embed_tokens,encoder_model,decoder_model}.onnx`
+# plus `tokenizer.json` at the root).
 [captioner.florence2-base]
-model_dir = "/path/to/Florence-2-base-ft/onnx"
+repo = "onnx-community/Florence-2-base-ft"
 prompt = "<MORE_DETAILED_CAPTION>"
 input_size = 768
 max_new_tokens = 1024
 ```
 
+Models are fetched via [`hf-hub`][hf-hub] into the same cache directory the
+Python `huggingface_hub` / sd-scripts / diffusers use, so any models already
+downloaded by other tools are reused for free.
+
 Key idea: model-specific quirks (ANIMA's `@artist`, alternate trainers'
 prefixes) are encoded as **export profiles**, not hardcoded.
+
+[hf-hub]: https://crates.io/crates/hf-hub
 
 ---
 
@@ -187,8 +198,9 @@ anima-tagger status <dir>
 
 Toolbar: open folder, filter dropdown, Select visible / Clear sel., Run
 tagger / Run captioner / Fetch booru. The model loads lazily on first run
-and is cached for the app's lifetime; opening a different folder
-invalidates the cache (config might point at a different model).
+(downloading the ONNX weights from HuggingFace if not already cached) and
+is reused for the app's lifetime; opening a different folder invalidates
+the cache (config might point at a different model).
 
 Detail panel:
 - 0 selected: hint.

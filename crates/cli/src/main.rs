@@ -114,20 +114,10 @@ fn cmd_tag(
 ) -> Result<()> {
     let cfg = ProjectConfig::load_or_default(&dir)
         .with_context(|| format!("loading config in {}", dir.display()))?;
-    let (resolved_name, profile) = cfg
-        .resolve_tagger(model_name.as_deref())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no tagger profile configured. Add a [tagger.<name>] section to anima-tagger.toml \
-                 with model_path and tags_path, and either pass --model <name> or set default_tagger."
-            )
-        })?;
+    let (resolved_name, profile) = cfg.resolve_tagger(model_name.as_deref());
     let threshold = threshold_override.unwrap_or(profile.storage_threshold);
 
-    eprintln!(
-        "loading model `{resolved_name}` from {} …",
-        profile.model_path.display()
-    );
+    eprintln!("loading tagger `{resolved_name}` from {} …", profile.repo);
     let mut tagger = Tagger::from_profile(&profile)?;
     eprintln!("model ready ({} tags)", tagger.num_tags());
 
@@ -157,20 +147,11 @@ fn cmd_tag(
 fn cmd_caption(dir: PathBuf, model_name: Option<String>, force: bool) -> Result<()> {
     let cfg = ProjectConfig::load_or_default(&dir)
         .with_context(|| format!("loading config in {}", dir.display()))?;
-    let (resolved_name, profile) = cfg
-        .resolve_captioner(model_name.as_deref())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no captioner profile configured. Add a [captioner.<name>] section to \
-                 anima-tagger.toml with model_dir (containing vision_encoder.onnx, \
-                 embed_tokens.onnx, encoder_model.onnx, decoder_model.onnx, tokenizer.json) \
-                 and either pass --model <name> or set default_captioner."
-            )
-        })?;
+    let (resolved_name, profile) = cfg.resolve_captioner(model_name.as_deref());
 
     eprintln!(
         "loading captioner `{resolved_name}` from {} …",
-        profile.model_dir.display()
+        profile.repo
     );
     let mut captioner = Captioner::from_profile(&profile)?;
     eprintln!("captioner ready");

@@ -616,13 +616,7 @@ fn run_tagger(
             return;
         }
     };
-    let Some((model_name, profile)) = cfg.resolve_tagger(None) else {
-        error_msg.set(Some(
-            "no [tagger.<name>] in anima-tagger.toml — set up a tagger profile first."
-                .into(),
-        ));
-        return;
-    };
+    let (model_name, profile) = cfg.resolve_tagger(None);
 
     let sel: Vec<PathBuf> = selected.read().iter().cloned().collect();
     if sel.is_empty() {
@@ -691,13 +685,7 @@ fn run_captioner(
             return;
         }
     };
-    let Some((model_name, profile)) = cfg.resolve_captioner(None) else {
-        error_msg.set(Some(
-            "no [captioner.<name>] in anima-tagger.toml — set up a captioner profile first."
-                .into(),
-        ));
-        return;
-    };
+    let (model_name, profile) = cfg.resolve_captioner(None);
 
     let sel: Vec<PathBuf> = selected.read().iter().cloned().collect();
     if sel.is_empty() {

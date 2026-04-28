@@ -1,12 +1,20 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const CONFIG_FILE: &str = "anima-tagger.toml";
 pub const DEFAULT_PROFILE_NAME: &str = "anima";
+
+/// Built-in tagger profile name + repo, used when nothing is configured.
+pub const BUILT_IN_TAGGER_NAME: &str = "wd-eva02-large-v3";
+pub const BUILT_IN_TAGGER_REPO: &str = "SmilingWolf/wd-eva02-large-tagger-v3";
+
+/// Built-in captioner profile name + repo, used when nothing is configured.
+pub const BUILT_IN_CAPTIONER_NAME: &str = "florence2-base";
+pub const BUILT_IN_CAPTIONER_REPO: &str = "onnx-community/Florence-2-base-ft";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
@@ -24,10 +32,15 @@ pub struct ProjectConfig {
     pub captioner: BTreeMap<String, CaptionerProfile>,
 }
 
+/// HuggingFace-hosted WD14-family tagger profile. Models are downloaded into
+/// the shared hf-hub cache on first use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaggerProfile {
-    pub model_path: PathBuf,
-    pub tags_path: PathBuf,
+    /// HuggingFace repo id, e.g. `"SmilingWolf/wd-eva02-large-tagger-v3"`.
+    pub repo: String,
+    /// Optional git revision/branch/tag to pin (defaults to the repo's `main`).
+    #[serde(default)]
+    pub revision: Option<String>,
     #[serde(default = "default_input_size")]
     pub input_size: u32,
     #[serde(default = "default_storage_threshold")]
@@ -42,11 +55,13 @@ fn default_storage_threshold() -> f32 {
     0.10
 }
 
+/// HuggingFace-hosted Florence-2 captioner profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptionerProfile {
-    /// Directory containing `vision_encoder.onnx`, `embed_tokens.onnx`,
-    /// `encoder_model.onnx`, `decoder_model.onnx`, and `tokenizer.json`.
-    pub model_dir: PathBuf,
+    /// HuggingFace repo id, e.g. `"onnx-community/Florence-2-base-ft"`.
+    pub repo: String,
+    #[serde(default)]
+    pub revision: Option<String>,
     #[serde(default = "default_caption_prompt")]
     pub prompt: String,
     #[serde(default = "default_caption_input_size")]
@@ -123,6 +138,29 @@ impl ExportProfile {
     }
 }
 
+impl TaggerProfile {
+    pub fn built_in() -> Self {
+        Self {
+            repo: BUILT_IN_TAGGER_REPO.to_string(),
+            revision: None,
+            input_size: default_input_size(),
+            storage_threshold: default_storage_threshold(),
+        }
+    }
+}
+
+impl CaptionerProfile {
+    pub fn built_in() -> Self {
+        Self {
+            repo: BUILT_IN_CAPTIONER_REPO.to_string(),
+            revision: None,
+            prompt: default_caption_prompt(),
+            input_size: default_caption_input_size(),
+            max_new_tokens: default_max_new_tokens(),
+        }
+    }
+}
+
 impl Default for ProjectConfig {
     fn default() -> Self {
         let mut export = BTreeMap::new();
@@ -143,13 +181,13 @@ impl Default for ProjectConfig {
 pub enum ConfigError {
     #[error("io error on {path}: {source}")]
     Io {
-        path: PathBuf,
+        path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
     },
     #[error("parse error on {path}: {source}")]
     Parse {
-        path: PathBuf,
+        path: std::path::PathBuf,
         #[source]
         source: toml::de::Error,
     },
@@ -188,21 +226,35 @@ impl ProjectConfig {
         ExportProfile::default()
     }
 
-    /// Resolve a tagger profile by explicit name or fall back to `default_tagger`.
-    /// Returns None if neither selects a valid profile (i.e. the user must configure one).
-    pub fn resolve_tagger(&self, name: Option<&str>) -> Option<(String, TaggerProfile)> {
+    /// Resolve a tagger profile. Order: explicit `name`, then `default_tagger`,
+    /// then the built-in profile. Always succeeds — auto-download means a
+    /// configured profile is no longer required.
+    pub fn resolve_tagger(&self, name: Option<&str>) -> (String, TaggerProfile) {
         let key = name
             .map(str::to_string)
-            .or_else(|| self.default_tagger.clone())?;
-        let profile = self.tagger.get(&key)?.clone();
-        Some((key, profile))
+            .or_else(|| self.default_tagger.clone());
+        if let Some(k) = key
+            && let Some(profile) = self.tagger.get(&k)
+        {
+            return (k, profile.clone());
+        }
+        (BUILT_IN_TAGGER_NAME.to_string(), TaggerProfile::built_in())
     }
 
-    pub fn resolve_captioner(&self, name: Option<&str>) -> Option<(String, CaptionerProfile)> {
+    /// Resolve a captioner profile, falling back to the built-in if nothing
+    /// matches. Same logic as `resolve_tagger`.
+    pub fn resolve_captioner(&self, name: Option<&str>) -> (String, CaptionerProfile) {
         let key = name
             .map(str::to_string)
-            .or_else(|| self.default_captioner.clone())?;
-        let profile = self.captioner.get(&key)?.clone();
-        Some((key, profile))
+            .or_else(|| self.default_captioner.clone());
+        if let Some(k) = key
+            && let Some(profile) = self.captioner.get(&k)
+        {
+            return (k, profile.clone());
+        }
+        (
+            BUILT_IN_CAPTIONER_NAME.to_string(),
+            CaptionerProfile::built_in(),
+        )
     }
 }

@@ -12,6 +12,7 @@
 use std::path::Path;
 
 use anima_tagger_core::config::CaptionerProfile;
+use anima_tagger_core::hub;
 use image::DynamicImage;
 use image::imageops::FilterType;
 use ort::session::Session;
@@ -40,6 +41,8 @@ pub enum CaptionerError {
     Image(#[from] image::ImageError),
     #[error("tokenizer: {0}")]
     Tokenizer(String),
+    #[error("hub: {0}")]
+    Hub(#[from] hub::HubError),
     #[error("model output shape unexpected: {0}")]
     Shape(String),
 }
@@ -63,14 +66,27 @@ pub struct Captioner {
 
 impl Captioner {
     pub fn from_profile(profile: &CaptionerProfile) -> Result<Self, CaptionerError> {
-        let dir = &profile.model_dir;
-        let vision = build_session(&dir.join("vision_encoder.onnx"), "vision_encoder")?;
-        let embed = build_session(&dir.join("embed_tokens.onnx"), "embed_tokens")?;
-        let encoder = build_session(&dir.join("encoder_model.onnx"), "encoder_model")?;
-        let decoder = build_session(&dir.join("decoder_model.onnx"), "decoder_model")?;
+        // onnx-community Florence-2 repos place the four ONNX submodels under
+        // `onnx/` and the tokenizer at the repo root. Other Florence-2 ONNX
+        // mirrors that follow the same layout work without changes.
+        let files = hub::fetch_files(
+            &profile.repo,
+            profile.revision.as_deref(),
+            &[
+                "onnx/vision_encoder.onnx",
+                "onnx/embed_tokens.onnx",
+                "onnx/encoder_model.onnx",
+                "onnx/decoder_model.onnx",
+                "tokenizer.json",
+            ],
+        )?;
+        let vision = build_session(&files[0], "vision_encoder")?;
+        let embed = build_session(&files[1], "embed_tokens")?;
+        let encoder = build_session(&files[2], "encoder_model")?;
+        let decoder = build_session(&files[3], "decoder_model")?;
 
-        let tokenizer_path = dir.join("tokenizer.json");
-        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+        let tokenizer_path = &files[4];
+        let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| {
             CaptionerError::Tokenizer(format!("loading {}: {e}", tokenizer_path.display()))
         })?;
 
