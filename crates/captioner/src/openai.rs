@@ -72,9 +72,21 @@ impl OpenAiCaptioner {
             "[captioner:openai] POST {url} (model={}, max_tokens={})",
             body.model, body.max_tokens
         );
-        let resp = req
-            .send_json(&body)
-            .map_err(|e| CaptionerError::Http(e.to_string()))?;
+        let resp = match req.send_json(&body) {
+            Ok(r) => r,
+            Err(ureq::Error::Status(code, response)) => {
+                // llama-server / koboldcpp / Ollama all return a JSON error
+                // body on non-2xx — surface it so missing-mmproj and similar
+                // server-side misconfigurations are obvious from this side.
+                let body = response.into_string().unwrap_or_default();
+                return Err(CaptionerError::Api(format!(
+                    "HTTP {code} from {url}: {body}"
+                )));
+            }
+            Err(ureq::Error::Transport(t)) => {
+                return Err(CaptionerError::Http(t.to_string()));
+            }
+        };
         let parsed: ChatResponse = resp
             .into_json()
             .map_err(|e| CaptionerError::Http(format!("decode body: {e}")))?;
