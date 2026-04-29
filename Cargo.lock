@@ -57,10 +57,14 @@ name = "anima-tagger-captioner"
 version = "0.1.0"
 dependencies = [
  "anima-tagger-core",
+ "base64 0.22.1",
  "image",
  "ort",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokenizers",
+ "ureq 2.12.1",
 ]
 
 [[package]]

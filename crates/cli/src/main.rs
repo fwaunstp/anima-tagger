@@ -151,7 +151,7 @@ fn cmd_caption(dir: PathBuf, model_name: Option<String>, force: bool) -> Result<
 
     eprintln!(
         "loading captioner `{resolved_name}` from {} …",
-        profile.repo
+        profile.source_label()
     );
     let mut captioner = Captioner::from_profile(&profile)?;
     eprintln!("captioner ready");

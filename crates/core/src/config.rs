@@ -60,11 +60,22 @@ fn default_storage_threshold() -> f32 {
     0.10
 }
 
-/// HuggingFace-hosted Qwen3-VL-family captioner profile. The image pipeline
-/// is dynamic-resolution (32-pixel patch grid, smart-resized at runtime), so
-/// instead of a fixed `input_size` we cap the area via `max_pixels`.
+/// Captioner profile. Tagged on `kind` so users can mix backends in one
+/// config: a local ONNX run for cheap shots, plus an OpenAI-compatible
+/// HTTP backend (llama.cpp / koboldcpp / Ollama / LM Studio / vLLM) for
+/// larger or NSFW-uncensored models that have no ONNX export.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CaptionerProfile {
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum CaptionerProfile {
+    Onnx(OnnxCaptionerProfile),
+    Openai(OpenAiCaptionerProfile),
+}
+
+/// HuggingFace-hosted Qwen3-VL-family ONNX captioner. Dynamic-resolution
+/// pipeline (32-pixel patch grid, smart-resized at runtime), so instead of
+/// a fixed `input_size` we cap the area via `max_pixels`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnnxCaptionerProfile {
     /// HuggingFace repo id, e.g. `"onnx-community/Qwen3-4B-VL-ONNX"`.
     pub repo: String,
     #[serde(default)]
@@ -76,8 +87,6 @@ pub struct CaptionerProfile {
     /// the repo root, leave this empty / `""`.
     #[serde(default)]
     pub subdir: Option<String>,
-    /// Free-text instruction sent to the model after the image. Used as the
-    /// user turn in the chat template.
     #[serde(default = "default_caption_prompt")]
     pub prompt: String,
     /// Upper bound on (resized_h * resized_w) during smart_resize. Larger
@@ -86,6 +95,43 @@ pub struct CaptionerProfile {
     pub max_pixels: u32,
     #[serde(default = "default_max_new_tokens")]
     pub max_new_tokens: usize,
+}
+
+/// OpenAI-compatible chat-completions captioner. Works against any server
+/// that implements `/chat/completions` with vision (`image_url` content
+/// parts): llama.cpp `llama-server`, koboldcpp, Ollama, LM Studio, vLLM,
+/// TGI, etc.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiCaptionerProfile {
+    /// Base URL up to and including `/v1` (we append `/chat/completions`).
+    /// e.g. `"http://localhost:8080/v1"` for llama-server's default.
+    pub endpoint: String,
+    /// Model name to send. Many local servers ignore it but a few require
+    /// a non-empty value; defaults to `"local"` if unset.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Bearer token. Empty/None = no `Authorization` header.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default = "default_caption_prompt")]
+    pub prompt: String,
+    #[serde(default = "default_max_new_tokens")]
+    pub max_tokens: usize,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// Resize the image so the longest edge is at most this many pixels
+    /// before sending. 0 = send the file bytes verbatim. Default 1024
+    /// keeps payloads sane against vision encoders that internally cap
+    /// pixel counts.
+    #[serde(default = "default_openai_max_edge")]
+    pub max_edge: u32,
+    /// JPEG quality (1-100) when `max_edge > 0`.
+    #[serde(default = "default_openai_jpeg_quality")]
+    pub jpeg_quality: u8,
+    /// Per-request timeout in seconds. Long-running CPU servers can need
+    /// several minutes for a single caption.
+    #[serde(default = "default_openai_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 fn default_caption_prompt() -> String {
@@ -101,6 +147,18 @@ fn default_max_pixels() -> u32 {
 
 fn default_max_new_tokens() -> usize {
     1024
+}
+
+fn default_openai_max_edge() -> u32 {
+    1024
+}
+
+fn default_openai_jpeg_quality() -> u8 {
+    90
+}
+
+fn default_openai_timeout_secs() -> u64 {
+    600
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,13 +230,21 @@ impl TaggerProfile {
 
 impl CaptionerProfile {
     pub fn built_in() -> Self {
-        Self {
+        Self::Onnx(OnnxCaptionerProfile {
             repo: BUILT_IN_CAPTIONER_REPO.to_string(),
             revision: None,
             subdir: Some(BUILT_IN_CAPTIONER_SUBDIR.to_string()),
             prompt: default_caption_prompt(),
             max_pixels: default_max_pixels(),
             max_new_tokens: default_max_new_tokens(),
+        })
+    }
+
+    /// Short human-readable description (HF repo, or HTTP endpoint).
+    pub fn source_label(&self) -> String {
+        match self {
+            Self::Onnx(p) => p.repo.clone(),
+            Self::Openai(p) => p.endpoint.clone(),
         }
     }
 }
