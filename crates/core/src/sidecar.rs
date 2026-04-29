@@ -69,6 +69,15 @@ pub struct BooruTag {
 pub struct CaptionEntry {
     pub caption: String,
     pub captioned_at: DateTime<Utc>,
+    /// Mark a generated caption as not-for-export without deleting it
+    /// (e.g. the model refused, or the wording is off). Skipped entries
+    /// stay visible in the GUI for reference.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,6 +137,7 @@ impl From<SidecarOnDisk> for Sidecar {
             captions.entry(model).or_insert(CaptionEntry {
                 caption: text,
                 captioned_at,
+                skip: false,
             });
         }
         Self {
@@ -162,6 +172,14 @@ pub enum SidecarError {
 
 pub fn sidecar_path_for(image: &Path) -> PathBuf {
     image.with_extension(SIDECAR_EXTENSION)
+}
+
+/// Collapse embedded newlines / tabs / runs of whitespace into a single
+/// space. Used at export time so a caption like
+/// `"foo\nbar"` doesn't accidentally become two variation lines when
+/// joined with `\n` for sd-scripts.
+fn flatten_caption(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn pretty_config() -> PrettyConfig {
@@ -222,6 +240,7 @@ impl Sidecar {
             CaptionEntry {
                 caption: text.into(),
                 captioned_at: Utc::now(),
+                skip: false,
             },
         );
     }
@@ -230,25 +249,49 @@ impl Sidecar {
         self.captions.remove(model).is_some()
     }
 
-    /// The caption written to training metadata on export. Prefers the
-    /// manual caption; falls back to the most recently generated auto
-    /// caption when the manual field is empty/unset, so an unreviewed
-    /// dataset still exports something useful instead of dropping the
-    /// caption entirely.
+    /// Returns the new skip state, or `None` if the model isn't present.
+    pub fn toggle_caption_skip(&mut self, model: &str) -> Option<bool> {
+        self.captions.get_mut(model).map(|e| {
+            e.skip = !e.skip;
+            e.skip
+        })
+    }
+
+    /// Caption text written on export.
+    ///
+    /// - No active auto captions (none stored, or all marked `skip`) →
+    ///   `manual_caption` is returned verbatim (or `None` if also empty).
+    /// - One or more active auto captions → each is flattened to a single
+    ///   line and prefixed with `manual_caption` (when non-empty); the
+    ///   results are joined with `\n` so sd-scripts' multi-caption
+    ///   shuffler can pick a variation per step.
+    ///
+    /// Embedded newlines in any auto caption are collapsed to spaces so
+    /// the `\n` separator can never split a single caption mid-sentence.
     pub fn export_caption(&self) -> Option<String> {
-        if let Some(text) = self
+        let manual = self
             .manual_caption
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(text.to_string());
-        }
-        self.captions
+            .filter(|s| !s.is_empty());
+
+        let active: Vec<String> = self
+            .captions
             .values()
-            .max_by_key(|e| e.captioned_at)
-            .map(|e| e.caption.trim().to_string())
+            .filter(|e| !e.skip)
+            .map(|e| flatten_caption(&e.caption))
             .filter(|s| !s.is_empty())
+            .collect();
+
+        if active.is_empty() {
+            return manual.map(str::to_string);
+        }
+
+        let lines: Vec<String> = match manual {
+            Some(prefix) => active.iter().map(|c| format!("{prefix} {c}")).collect(),
+            None => active,
+        };
+        Some(lines.join("\n"))
     }
 
     pub fn set_manual_caption(&mut self, text: &str) {
@@ -359,27 +402,79 @@ mod tests {
     }
 
     #[test]
-    fn export_caption_prefers_manual_then_falls_back_to_latest_auto() {
-        let mut sc = Sidecar::default();
-        // No captions at all → None.
+    fn export_caption_no_captions_at_all_is_none() {
+        let sc = Sidecar::default();
         assert_eq!(sc.export_caption(), None);
+    }
 
-        // Only an auto caption → fall back to it.
-        sc.set_caption("modelA", "auto text");
-        assert_eq!(sc.export_caption().as_deref(), Some("auto text"));
-
-        // A second auto caption with a later timestamp wins the fallback.
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        sc.set_caption("modelB", "newer auto text");
-        assert_eq!(sc.export_caption().as_deref(), Some("newer auto text"));
-
-        // Manual caption overrides any auto.
+    #[test]
+    fn export_caption_only_manual_returns_it_verbatim() {
+        let mut sc = Sidecar::default();
         sc.set_manual_caption("manual text");
         assert_eq!(sc.export_caption().as_deref(), Some("manual text"));
+    }
 
-        // Empty/whitespace manual falls back again.
-        sc.set_manual_caption("   ");
-        assert_eq!(sc.export_caption().as_deref(), Some("newer auto text"));
+    #[test]
+    fn export_caption_only_auto_no_manual_returns_auto_lines() {
+        let mut sc = Sidecar::default();
+        sc.set_caption("a", "first caption");
+        sc.set_caption("b", "second caption");
+        // BTreeMap iterates in key order: a, b.
+        assert_eq!(
+            sc.export_caption().as_deref(),
+            Some("first caption\nsecond caption")
+        );
+    }
+
+    #[test]
+    fn export_caption_manual_prefixes_every_auto_line() {
+        let mut sc = Sidecar::default();
+        sc.set_manual_caption("char_a, scene_x");
+        sc.set_caption("a", "a girl smiling");
+        sc.set_caption("b", "young woman, smile");
+        assert_eq!(
+            sc.export_caption().as_deref(),
+            Some("char_a, scene_x a girl smiling\nchar_a, scene_x young woman, smile")
+        );
+    }
+
+    #[test]
+    fn export_caption_skipped_entries_are_excluded() {
+        let mut sc = Sidecar::default();
+        sc.set_caption("refused", "I can't describe this image");
+        sc.set_caption("good", "a girl in a garden");
+        assert_eq!(sc.toggle_caption_skip("refused"), Some(true));
+        assert_eq!(sc.export_caption().as_deref(), Some("a girl in a garden"));
+    }
+
+    #[test]
+    fn export_caption_all_skipped_falls_back_to_manual_only() {
+        let mut sc = Sidecar::default();
+        sc.set_manual_caption("manual fallback");
+        sc.set_caption("a", "auto1");
+        sc.set_caption("b", "auto2");
+        sc.toggle_caption_skip("a");
+        sc.toggle_caption_skip("b");
+        assert_eq!(sc.export_caption().as_deref(), Some("manual fallback"));
+    }
+
+    #[test]
+    fn export_caption_flattens_embedded_newlines() {
+        let mut sc = Sidecar::default();
+        sc.set_caption("a", "line1\n\nline2  with    spaces");
+        sc.set_caption("b", "another\tline");
+        assert_eq!(
+            sc.export_caption().as_deref(),
+            Some("line1 line2 with spaces\nanother line")
+        );
+    }
+
+    #[test]
+    fn export_caption_skips_empty_after_flatten() {
+        let mut sc = Sidecar::default();
+        sc.set_caption("blank", "   \n\n  ");
+        sc.set_caption("real", "actual caption");
+        assert_eq!(sc.export_caption().as_deref(), Some("actual caption"));
     }
 
     #[test]

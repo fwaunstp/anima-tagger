@@ -471,13 +471,23 @@ fn SingleDetail(
             for (model, entry) in item.sidecar.captions.iter() {
                 {
                     let model_name = model.clone();
+                    let model_for_skip = model.clone();
                     let model_for_remove = model.clone();
                     let text = entry.caption.clone();
                     let text_for_copy = text.clone();
                     let path_for_copy = path.clone();
+                    let path_for_skip = path.clone();
                     let path_for_remove = path.clone();
+                    let skipped = entry.skip;
+                    let block_class = if skipped { "auto-caption skipped" } else { "auto-caption" };
+                    let skip_label = if skipped { "unskip" } else { "skip" };
+                    let skip_title = if skipped {
+                        "Re-enable this caption for export"
+                    } else {
+                        "Keep this caption stored but exclude from export"
+                    };
                     rsx! {
-                        div { class: "auto-caption",
+                        div { class: "{block_class}",
                             div { class: "auto-caption-head",
                                 span { class: "model-name", "{model_name}" }
                                 button {
@@ -485,6 +495,12 @@ fn SingleDetail(
                                     title: "Copy this caption into the manual caption field",
                                     onclick: move |_| copy_caption_to_manual(images, path_for_copy.clone(), text_for_copy.clone()),
                                     "→ manual"
+                                }
+                                button {
+                                    class: "tiny secondary",
+                                    title: "{skip_title}",
+                                    onclick: move |_| toggle_caption_skip_at(images, path_for_skip.clone(), model_for_skip.clone()),
+                                    "{skip_label}"
                                 }
                                 button {
                                     class: "tiny secondary",
@@ -549,6 +565,19 @@ fn remove_caption_at(mut images: Signal<Vec<ImageItem>>, path: PathBuf, model: S
     let mut imgs = images.write();
     if let Some(img) = imgs.iter_mut().find(|i| i.path == path)
         && img.sidecar.remove_caption(&model)
+    {
+        let _ = img.sidecar.save(&img.path);
+    }
+}
+
+fn toggle_caption_skip_at(
+    mut images: Signal<Vec<ImageItem>>,
+    path: PathBuf,
+    model: String,
+) {
+    let mut imgs = images.write();
+    if let Some(img) = imgs.iter_mut().find(|i| i.path == path)
+        && img.sidecar.toggle_caption_skip(&model).is_some()
     {
         let _ = img.sidecar.save(&img.path);
     }
@@ -979,6 +1008,11 @@ body {
     padding: 6px 8px;
     margin-bottom: 6px;
 }
+.auto-caption.skipped {
+    opacity: 0.55;
+    border-style: dashed;
+}
+.auto-caption.skipped .caption { text-decoration: line-through; }
 .auto-caption-head {
     display: flex; align-items: center; gap: 6px;
     margin-bottom: 4px;
