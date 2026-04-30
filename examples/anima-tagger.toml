@@ -1,0 +1,106 @@
+# Example anima-tagger configuration.
+#
+# Drop this file into a dataset directory as `anima-tagger.toml` for
+# project-local options, or keep a copy at
+# `~/.config/anima-tagger/config.toml` (resp.
+# `$XDG_CONFIG_HOME/anima-tagger/config.toml`) for user-wide defaults.
+# Per-directory entries win on key collision; everything is optional and
+# falls back to the built-in defaults if the file is absent.
+
+# Selectors: which profile each subcommand uses when invoked without
+# `--profile` / `--model`. Comment any of them out to fall back to the
+# built-ins (anima export profile, wd-eva02-large-v3 tagger,
+# qwen3-vl-4b captioner).
+default_profile   = "anima"
+default_tagger    = "wd-eva02-large-v3"
+default_captioner = "qwen3-vl-4b"
+
+# ---------------------------------------------------------------------------
+# Export profiles — control how tags are filtered/formatted on `export`
+# (one .txt per image) and `metadata` (one meta.json for the directory).
+# ---------------------------------------------------------------------------
+
+[export.anima]
+# Score cutoff applied to auto tags at export time.
+threshold = 0.35
+# sd-scripts shuffles tag order at training time, so leave this off.
+shuffle = false
+# Drop auto tags whose category is in this list (e.g. "meta", "rating").
+exclude_categories = []
+
+# Per-category prefix applied to auto tags. ANIMA expects `@artist_name`.
+[export.anima.category_prefixes]
+artist = "@"
+
+[export.plain]
+threshold = 0.35
+shuffle = false
+exclude_categories = []
+
+# (no per-category prefixes for plain training)
+[export.plain.category_prefixes]
+
+# ---------------------------------------------------------------------------
+# Tagger profiles — HuggingFace-hosted WD14-family models. Models are
+# downloaded into the shared hf-hub cache on first use.
+# ---------------------------------------------------------------------------
+
+[tagger.wd-eva02-large-v3]
+repo = "SmilingWolf/wd-eva02-large-tagger-v3"
+# Pin a branch / tag / commit. Defaults to the repo's `main` if omitted.
+revision = "main"
+input_size = 448
+# Tags scoring below this are dropped before being stored in the sidecar,
+# leaving room to re-filter with a lower `threshold` at export time
+# without re-running inference.
+storage_threshold = 0.10
+
+# ---------------------------------------------------------------------------
+# Captioner profiles. Use `kind = "onnx"` for a local HF-hosted ONNX
+# pipeline, or `kind = "openai"` to call any OpenAI-compatible
+# chat-completions endpoint (llama.cpp, koboldcpp, Ollama, LM Studio,
+# vLLM, ...).
+# ---------------------------------------------------------------------------
+
+[captioner.qwen3-vl-4b]
+kind = "onnx"
+repo = "onnx-community/Qwen3-4B-VL-ONNX"
+revision = "main"
+# onnx-community packs multiple variants per repo under variant-named
+# subdirectories. Leave empty / `""` for forks that put the ONNX files
+# at the repo root.
+subdir = "qwen3-vl-4b-instruct-onnx-vision-fp32-text-int4-cpu"
+# Smart-resize area cap (~768x768). Larger = richer captions, quadratically
+# slower decode.
+max_pixels = 589824
+max_new_tokens = 1024
+
+# Named prompts run against the same loaded model. Sidecar entries are
+# keyed `{profile_name}.{prompt_name}` so detail / brief variants of the
+# same model coexist.
+[captioner.qwen3-vl-4b.prompts]
+detail = "Describe this image in detail."
+brief = "Describe this image briefly in one sentence."
+
+[captioner.local-llamacpp]
+kind = "openai"
+# Base URL up to and including `/v1` (we append `/chat/completions`).
+endpoint = "http://localhost:8080/v1"
+# Sent verbatim as the chat-completions `model` field. Many local servers
+# ignore it; some require a non-empty value.
+model = "local"
+# Bearer token. Empty string / omit for unauthenticated local servers.
+api_key = ""
+max_tokens = 1024
+temperature = 0.7
+# Resize so the longest edge is at most this many pixels before sending.
+# 0 = send the file bytes verbatim.
+max_edge = 1024
+jpeg_quality = 90
+# Per-request timeout. CPU-bound local servers can need several minutes
+# for a single caption.
+timeout_secs = 600
+
+[captioner.local-llamacpp.prompts]
+detail = "Describe this image in detail."
+brief = "Describe this image briefly in one sentence."
