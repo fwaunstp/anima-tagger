@@ -364,11 +364,27 @@ impl ProjectConfig {
         Ok(Some(cfg))
     }
 
-    /// Load only the per-directory `anima-tagger.toml`, ignoring the user
-    /// config. Kept for callers that need to inspect what a single
-    /// dataset declared.
+    /// Walk up from `start` looking for an `anima-tagger.toml`. Returns the
+    /// first matching file (analogous to how `git` finds `.git`). This lets
+    /// users keep a single config at the dataset root while operating on
+    /// subdirectories.
+    pub fn find_project_config(start: &Path) -> Option<PathBuf> {
+        let abs = start
+            .canonicalize()
+            .unwrap_or_else(|_| start.to_path_buf());
+        abs.ancestors()
+            .map(|d| d.join(CONFIG_FILE))
+            .find(|p| p.is_file())
+    }
+
+    /// Load the project `anima-tagger.toml`, searching `dir` and its
+    /// ancestors. Ignores the user config. Returns `None` if no project
+    /// config exists anywhere up the tree.
     pub fn load(dir: &Path) -> Result<Option<Self>, ConfigError> {
-        Self::load_path(&dir.join(CONFIG_FILE))
+        match Self::find_project_config(dir) {
+            Some(p) => Self::load_path(&p),
+            None => Ok(None),
+        }
     }
 
     /// User-level config (no merge with project).
@@ -465,6 +481,63 @@ impl ProjectConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drops a fresh subdirectory under `temp_dir()` on Drop so tests that
+    /// touch the real filesystem don't leak files between runs.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "anima-tagger-test-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+            ));
+            fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn find_project_config_walks_up_to_parent() {
+        let root = TempDir::new("walkup");
+        let nested = root.path().join("a").join("b").join("c");
+        fs::create_dir_all(&nested).unwrap();
+        let cfg_path = root.path().join(CONFIG_FILE);
+        fs::write(&cfg_path, "default_profile = \"plain\"\n").unwrap();
+
+        let found = ProjectConfig::find_project_config(&nested)
+            .expect("should walk up to root config");
+        assert_eq!(found.canonicalize().unwrap(), cfg_path.canonicalize().unwrap());
+
+        let cfg = ProjectConfig::load(&nested)
+            .expect("load ok")
+            .expect("config present");
+        assert_eq!(cfg.default_profile.as_deref(), Some("plain"));
+    }
+
+    #[test]
+    fn find_project_config_prefers_nearest_ancestor() {
+        let root = TempDir::new("nearest");
+        let mid = root.path().join("mid");
+        let leaf = mid.join("leaf");
+        fs::create_dir_all(&leaf).unwrap();
+        fs::write(root.path().join(CONFIG_FILE), "default_profile = \"root\"\n").unwrap();
+        fs::write(mid.join(CONFIG_FILE), "default_profile = \"mid\"\n").unwrap();
+
+        let cfg = ProjectConfig::load(&leaf).unwrap().unwrap();
+        assert_eq!(cfg.default_profile.as_deref(), Some("mid"));
+    }
 
     #[test]
     fn merge_project_overrides_user() {
@@ -570,5 +643,174 @@ mod tests {
         merged.merge_from(project);
 
         assert!(merged.tagger.contains_key("wd-tagger"));
+    }
+
+    /// Guard: when a field is added to any of the profile structs, the
+    /// shipped example (`examples/anima-tagger.toml`) has to grow alongside
+    /// it. The test serializes a fully-populated synthetic instance of each
+    /// profile, then asserts that at least one profile of the matching kind
+    /// in the example covers every produced key.
+    ///
+    /// Legacy / deprecated fields are left as `None` so they don't have to
+    /// appear in the example (they round-trip via `skip_serializing_if`).
+    #[test]
+    fn example_config_documents_every_supported_field() {
+        use std::collections::BTreeSet;
+
+        let example_str = include_str!("../../../examples/anima-tagger.toml");
+        let cfg: ProjectConfig = toml::from_str(example_str)
+            .expect("examples/anima-tagger.toml must parse as ProjectConfig");
+        let raw: toml::Value = toml::from_str(example_str)
+            .expect("examples/anima-tagger.toml must parse as toml::Value");
+        let raw_table = raw.as_table().expect("example must be a top-level table");
+
+        for k in ["default_profile", "default_tagger", "default_captioner"] {
+            assert!(
+                raw_table.contains_key(k),
+                "example missing top-level key `{k}`"
+            );
+        }
+
+        if let Some(p) = &cfg.default_profile {
+            assert!(
+                cfg.export.contains_key(p),
+                "default_profile = {p:?} but no matching [export.{p}] in the example"
+            );
+        }
+        if let Some(t) = &cfg.default_tagger {
+            assert!(
+                cfg.tagger.contains_key(t),
+                "default_tagger = {t:?} but no matching [tagger.{t}] in the example"
+            );
+        }
+        if let Some(c) = &cfg.default_captioner {
+            assert!(
+                cfg.captioner.contains_key(c),
+                "default_captioner = {c:?} but no matching [captioner.{c}] in the example"
+            );
+        }
+
+        fn struct_keys<T: serde::Serialize>(v: T) -> BTreeSet<String> {
+            #[derive(serde::Serialize)]
+            struct Wrap<T: serde::Serialize> {
+                inner: T,
+            }
+            let s = toml::to_string(&Wrap { inner: v }).expect("serialize wrapped value");
+            let parsed: toml::Value = toml::from_str(&s).expect("re-parse wrapped value");
+            parsed
+                .get("inner")
+                .and_then(|v| v.as_table())
+                .expect("wrapped value must serialize to a table")
+                .keys()
+                .cloned()
+                .collect()
+        }
+
+        fn missing_from_best_match(
+            section: Option<&toml::Value>,
+            expected: &BTreeSet<String>,
+            filter: impl Fn(&toml::Table) -> bool,
+        ) -> Result<(), BTreeSet<String>> {
+            let Some(table) = section.and_then(|v| v.as_table()) else {
+                return Err(expected.clone());
+            };
+            let mut best: Option<BTreeSet<String>> = None;
+            for profile in table.values() {
+                let Some(pt) = profile.as_table() else {
+                    continue;
+                };
+                if !filter(pt) {
+                    continue;
+                }
+                let actual: BTreeSet<String> = pt.keys().cloned().collect();
+                let missing: BTreeSet<String> =
+                    expected.difference(&actual).cloned().collect();
+                if missing.is_empty() {
+                    return Ok(());
+                }
+                if best.as_ref().is_none_or(|b| missing.len() < b.len()) {
+                    best = Some(missing);
+                }
+            }
+            Err(best.unwrap_or_else(|| expected.clone()))
+        }
+
+        let full_export = ExportProfile {
+            threshold: 0.35,
+            shuffle: true,
+            exclude_categories: vec!["meta".into()],
+            category_prefixes: BTreeMap::from([("artist".into(), "@".into())]),
+        };
+        let full_tagger = TaggerProfile {
+            repo: "r".into(),
+            revision: Some("main".into()),
+            input_size: 448,
+            storage_threshold: 0.10,
+        };
+        let full_onnx = CaptionerProfile::Onnx(OnnxCaptionerProfile {
+            repo: "r".into(),
+            revision: Some("main".into()),
+            subdir: Some("d".into()),
+            prompt: None,
+            prompts: BTreeMap::from([("detail".into(), "x".into())]),
+            max_pixels: default_max_pixels(),
+            max_new_tokens: default_max_new_tokens(),
+        });
+        let full_openai = CaptionerProfile::Openai(OpenAiCaptionerProfile {
+            endpoint: "http://x".into(),
+            model: Some("m".into()),
+            api_key: Some("k".into()),
+            prompt: None,
+            prompts: BTreeMap::from([("detail".into(), "x".into())]),
+            max_tokens: default_max_new_tokens(),
+            temperature: Some(0.7),
+            max_edge: default_openai_max_edge(),
+            jpeg_quality: default_openai_jpeg_quality(),
+            timeout_secs: default_openai_timeout_secs(),
+        });
+
+        let expected_export = struct_keys(full_export);
+        let expected_tagger = struct_keys(full_tagger);
+        let expected_onnx = struct_keys(full_onnx);
+        let expected_openai = struct_keys(full_openai);
+
+        if let Err(missing) =
+            missing_from_best_match(raw_table.get("export"), &expected_export, |_| true)
+        {
+            panic!(
+                "no [export.*] profile in examples/anima-tagger.toml covers every \
+                 ExportProfile field; closest match is missing {missing:?}"
+            );
+        }
+        if let Err(missing) =
+            missing_from_best_match(raw_table.get("tagger"), &expected_tagger, |_| true)
+        {
+            panic!(
+                "no [tagger.*] profile in examples/anima-tagger.toml covers every \
+                 TaggerProfile field; closest match is missing {missing:?}"
+            );
+        }
+        if let Err(missing) = missing_from_best_match(
+            raw_table.get("captioner"),
+            &expected_onnx,
+            |t| t.get("kind").and_then(|v| v.as_str()) == Some("onnx"),
+        ) {
+            panic!(
+                "no [captioner.*] profile with `kind = \"onnx\"` in \
+                 examples/anima-tagger.toml covers every OnnxCaptionerProfile field; \
+                 closest match is missing {missing:?}"
+            );
+        }
+        if let Err(missing) = missing_from_best_match(
+            raw_table.get("captioner"),
+            &expected_openai,
+            |t| t.get("kind").and_then(|v| v.as_str()) == Some("openai"),
+        ) {
+            panic!(
+                "no [captioner.*] profile with `kind = \"openai\"` in \
+                 examples/anima-tagger.toml covers every OpenAiCaptionerProfile field; \
+                 closest match is missing {missing:?}"
+            );
+        }
     }
 }
