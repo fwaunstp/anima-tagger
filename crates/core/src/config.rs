@@ -152,24 +152,17 @@ pub struct OpenAiCaptionerProfile {
     pub timeout_secs: u64,
 }
 
-/// Built-in prompt set: a detailed long-form description and a one-sentence
-/// summary. Loaded as the default whenever a profile declares no `prompts`
-/// and no legacy `prompt`.
+/// Built-in prompt: a single descriptive prompt sized to fit comfortably
+/// inside ANIMA's 512-token training ceiling. Loaded whenever a profile
+/// declares no `prompts` and no legacy `prompt`. Override per-profile to
+/// shape captions for the LoRA at hand (e.g. focus on characters, scene,
+/// or a specific subject).
 pub fn default_prompts() -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
-    // Length cap chosen to fit comfortably inside ANIMA's 512-token training
-    // ceiling (qwen3_max_token_length / t5_max_token_length defaults in
-    // kohya-ss anima_train_network) once tokenized. Without an explicit
-    // limit, larger VLMs (Gemma-3 27B/31B etc.) happily produce 1k+ tokens
-    // and overflow.
     m.insert(
-        "detail".to_string(),
+        "default".to_string(),
         "Describe this image in detail in 3-5 sentences (under 200 words)."
             .to_string(),
-    );
-    m.insert(
-        "brief".to_string(),
-        "Describe this image briefly in one sentence.".to_string(),
     );
     m
 }
@@ -604,8 +597,8 @@ mod tests {
     fn resolved_prompts_falls_back_to_defaults_when_unset() {
         let cfg = CaptionerProfile::built_in();
         let prompts = cfg.resolved_prompts();
-        assert!(prompts.contains_key("detail"));
-        assert!(prompts.contains_key("brief"));
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts.contains_key("default"));
     }
 
     #[test]

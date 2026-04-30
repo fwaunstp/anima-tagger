@@ -58,8 +58,9 @@ impl Captioner {
     }
 
     /// Generate a caption for `image_path` using `prompt`. Callers iterate
-    /// over `CaptionerProfile::resolved_prompts()` to drive multiple prompts
-    /// (e.g. detail + brief) against the same loaded model.
+    /// over `CaptionerProfile::resolved_prompts()` to drive multiple
+    /// prompts against the same loaded model (sidecar keys are
+    /// `{model}.{prompt_name}`).
     ///
     /// `context` is optional reference info (e.g. character names + screen
     /// positions) embedded inside the user turn alongside the image so the

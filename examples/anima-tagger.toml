@@ -84,11 +84,12 @@ max_pixels = 589824
 max_new_tokens = 512
 
 # Named prompts run against the same loaded model. Sidecar entries are
-# keyed `{profile_name}.{prompt_name}` so detail / brief variants of the
-# same model coexist.
+# keyed `{profile_name}.{prompt_name}`, so adding a prompt here gives you
+# a parallel caption variant without re-loading the model. Built-in
+# default is a single `default` prompt; override it (or add more named
+# prompts) to focus the captioner on what your LoRA needs.
 [captioner.qwen3-vl-4b.prompts]
-detail = "Describe this image in detail in 3-5 sentences (under 200 words)."
-brief = "Describe this image briefly in one sentence."
+default = "Describe this image in detail in 3-5 sentences (under 200 words)."
 
 [captioner.local-llamacpp]
 kind = "openai"
@@ -110,5 +111,4 @@ jpeg_quality = 90
 timeout_secs = 600
 
 [captioner.local-llamacpp.prompts]
-detail = "Describe this image in detail in 3-5 sentences (under 200 words)."
-brief = "Describe this image briefly in one sentence."
+default = "Describe this image in detail in 3-5 sentences (under 200 words)."
