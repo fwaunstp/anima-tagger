@@ -146,6 +146,7 @@ impl OnnxCaptioner {
         &mut self,
         image_path: &Path,
         prompt: &str,
+        context: Option<&str>,
     ) -> Result<String, CaptionerError> {
         let img = image::open(image_path)?;
 
@@ -195,7 +196,7 @@ impl OnnxCaptioner {
         drop(vision_out);
 
         // 3. Render chat template, tokenize.
-        let chat_prompt = build_chat_prompt(prompt);
+        let chat_prompt = build_chat_prompt(prompt, context);
         let encoding = self
             .tokenizer
             .encode(chat_prompt, false)
@@ -448,11 +449,21 @@ fn argmax_i64(slice: &[f32]) -> i64 {
     best as i64
 }
 
-fn build_chat_prompt(user_instruction: &str) -> String {
+fn build_chat_prompt(user_instruction: &str, context: Option<&str>) -> String {
     // Qwen3-VL's default chat template emits no system block when none is
-    // supplied (different from Qwen2-VL). Single image + single user turn:
+    // supplied (different from Qwen2-VL). Single image + single user turn.
+    //
+    // Caller-supplied `context` (character names / positions / scene
+    // continuity) is image-specific reference info, so we embed it inside
+    // the user turn next to the image rather than as a system turn — that
+    // way the model sees image, context, and instruction together as one
+    // unit instead of a free-floating persona-style preamble.
+    let body = match context {
+        Some(ctx) => format!("Context: {ctx}\n\n{user_instruction}"),
+        None => user_instruction.to_string(),
+    };
     format!(
-        "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{user_instruction}<|im_end|>\n\
+        "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{body}<|im_end|>\n\
          <|im_start|>assistant\n"
     )
 }

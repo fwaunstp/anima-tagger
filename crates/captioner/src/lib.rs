@@ -60,14 +60,21 @@ impl Captioner {
     /// Generate a caption for `image_path` using `prompt`. Callers iterate
     /// over `CaptionerProfile::resolved_prompts()` to drive multiple prompts
     /// (e.g. detail + brief) against the same loaded model.
+    ///
+    /// `context` is optional reference info (e.g. character names + screen
+    /// positions) embedded inside the user turn alongside the image so the
+    /// model treats it as image-specific facts rather than global persona
+    /// guidance. `None` / empty passes the prompt through unchanged.
     pub fn caption_image(
         &mut self,
         image_path: &Path,
         prompt: &str,
+        context: Option<&str>,
     ) -> Result<String, CaptionerError> {
+        let context = context.map(str::trim).filter(|s| !s.is_empty());
         match self {
-            Self::Onnx(c) => c.caption_image(image_path, prompt),
-            Self::OpenAi(c) => c.caption_image(image_path, prompt),
+            Self::Onnx(c) => c.caption_image(image_path, prompt, context),
+            Self::OpenAi(c) => c.caption_image(image_path, prompt, context),
         }
     }
 }

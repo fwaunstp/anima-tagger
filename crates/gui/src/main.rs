@@ -489,6 +489,20 @@ fn SingleDetail(
             }
         }
 
+        div { class: "section-title", "Caption hint (passed to captioner only)" }
+        {
+            let hint_text = item.sidecar.caption_hint.clone().unwrap_or_default();
+            let editor_key = format!("hint::{}::{}", path.display(), hint_text);
+            rsx! {
+                CaptionHintEditor {
+                    key: "{editor_key}",
+                    path: path.clone(),
+                    images,
+                    initial: hint_text,
+                }
+            }
+        }
+
         div { class: "section-title", "Caption (manual — exported)" }
         {
             let manual_text = item.sidecar.manual_caption.clone().unwrap_or_default();
@@ -592,6 +606,34 @@ fn save_manual_caption(mut images: Signal<Vec<ImageItem>>, path: PathBuf, text: 
     }
 }
 
+#[component]
+fn CaptionHintEditor(
+    path: PathBuf,
+    images: Signal<Vec<ImageItem>>,
+    initial: String,
+) -> Element {
+    let mut buf = use_signal(|| initial.clone());
+    let path_for_change = path.clone();
+    rsx! {
+        textarea {
+            class: "manual-caption",
+            placeholder: "Reference info for the captioner (e.g. \"The girl with red hair on the left is Alice; the boy on the right is Bob.\"). Sent as a system turn — does NOT appear in the exported .txt. Click outside to save.",
+            value: "{buf}",
+            rows: "3",
+            oninput: move |evt| buf.set(evt.value()),
+            onchange: move |evt| save_caption_hint(images, path_for_change.clone(), evt.value()),
+        }
+    }
+}
+
+fn save_caption_hint(mut images: Signal<Vec<ImageItem>>, path: PathBuf, text: String) {
+    let mut imgs = images.write();
+    if let Some(img) = imgs.iter_mut().find(|i| i.path == path) {
+        img.sidecar.set_caption_hint(&text);
+        let _ = img.sidecar.save(&img.path);
+    }
+}
+
 fn copy_caption_to_manual(mut images: Signal<Vec<ImageItem>>, path: PathBuf, text: String) {
     let mut imgs = images.write();
     if let Some(img) = imgs.iter_mut().find(|i| i.path == path) {
@@ -666,6 +708,59 @@ fn bulk_remove_caption(mut images: Signal<Vec<ImageItem>>, paths: Vec<PathBuf>, 
         if img.sidecar.remove_caption(&model) {
             let _ = img.sidecar.save(&img.path);
         }
+    }
+}
+
+#[component]
+fn BulkCaptionHintEditor(
+    paths: Vec<PathBuf>,
+    images: Signal<Vec<ImageItem>>,
+    initial: String,
+) -> Element {
+    let mut buf = use_signal(|| initial.clone());
+    let paths_for_apply = paths.clone();
+    let paths_for_clear = paths.clone();
+    rsx! {
+        textarea {
+            class: "manual-caption",
+            placeholder: "Reference info applied to every selected image. Sent to the captioner as a system turn.",
+            value: "{buf}",
+            rows: "3",
+            oninput: move |evt| buf.set(evt.value()),
+        }
+        div { class: "tag-list",
+            button {
+                class: "tiny",
+                onclick: move |_| {
+                    let text = buf.read().clone();
+                    bulk_set_caption_hint(images, paths_for_apply.clone(), text);
+                },
+                "Apply to all selected"
+            }
+            button {
+                class: "tiny secondary",
+                onclick: move |_| {
+                    buf.set(String::new());
+                    bulk_set_caption_hint(images, paths_for_clear.clone(), String::new());
+                },
+                "Clear"
+            }
+        }
+    }
+}
+
+fn bulk_set_caption_hint(
+    mut images: Signal<Vec<ImageItem>>,
+    paths: Vec<PathBuf>,
+    text: String,
+) {
+    let mut imgs = images.write();
+    for img in imgs.iter_mut() {
+        if !paths.contains(&img.path) {
+            continue;
+        }
+        img.sidecar.set_caption_hint(&text);
+        let _ = img.sidecar.save(&img.path);
     }
 }
 
@@ -746,8 +841,36 @@ fn BulkDetail(
     }
     caption_order.sort();
 
+    let hint_values: Vec<&str> = selected_items
+        .iter()
+        .map(|i| i.sidecar.caption_hint.as_deref().unwrap_or(""))
+        .collect();
+    let common_hint: String = if hint_values.iter().all(|v| *v == hint_values[0]) {
+        hint_values[0].to_string()
+    } else {
+        String::new()
+    };
+    let hints_uniform = hint_values.iter().all(|v| *v == hint_values[0]);
+    let bulk_hint_key = format!(
+        "bulk-hint::{n}::{:x}",
+        common_hint
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+    );
+
     rsx! {
         p { class: "muted", "{n} images selected — bulk edit" }
+
+        div { class: "section-title", "Caption hint (apply to all selected)" }
+        if !hints_uniform {
+            p { class: "muted small", "(selected images have differing hints — applying will overwrite all)" }
+        }
+        BulkCaptionHintEditor {
+            key: "{bulk_hint_key}",
+            paths: selected_paths.clone(),
+            images,
+            initial: common_hint,
+        }
 
         div { class: "section-title", "Manual entries (union)" }
         if manual_order.is_empty() {
@@ -952,9 +1075,10 @@ fn run_captioner(
                 continue;
             }
             let mut wrote_any = false;
+            let hint = img.sidecar.caption_hint.clone();
             for (pname, ptext) in &prompts {
                 let key = format!("{model_name}.{pname}");
-                match captioner_inst.caption_image(&img.path, ptext) {
+                match captioner_inst.caption_image(&img.path, ptext, hint.as_deref()) {
                     Ok(caption) => {
                         img.sidecar.set_caption(key, caption);
                         wrote_any = true;

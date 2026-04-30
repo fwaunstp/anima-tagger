@@ -178,8 +178,9 @@ fn cmd_caption(dir: PathBuf, model_name: Option<String>, force: bool) -> Result<
             continue;
         }
         let mut wrote_any = false;
+        let hint = sc.caption_hint.clone();
         for (key, pname, ptext) in pending {
-            let caption = captioner.caption_image(&image, &ptext)?;
+            let caption = captioner.caption_image(&image, &ptext, hint.as_deref())?;
             let preview: String = caption.chars().take(60).collect();
             sc.set_caption(key, caption);
             wrote_any = true;

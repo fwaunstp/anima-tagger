@@ -46,6 +46,13 @@ pub struct Sidecar {
     /// copy-from-auto button, or type it by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_caption: Option<String>,
+    /// Reference info handed to the captioner as a system turn at generation
+    /// time (e.g. character names + positions). Lets the model weave the
+    /// names into its own prose rather than the caller prepending them
+    /// verbatim. Never appears in the exported `.txt` directly — it's pure
+    /// input to the captioner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tagger: Option<TaggerInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,6 +122,8 @@ struct SidecarOnDisk {
     #[serde(default)]
     manual_caption: Option<String>,
     #[serde(default)]
+    caption_hint: Option<String>,
+    #[serde(default)]
     tagger: Option<TaggerInfo>,
     #[serde(default)]
     booru: Option<BooruInfo>,
@@ -146,6 +155,7 @@ impl From<SidecarOnDisk> for Sidecar {
             booru_tags: d.booru_tags,
             captions,
             manual_caption: d.manual_caption,
+            caption_hint: d.caption_hint,
             tagger: d.tagger,
             booru: d.booru,
         }
@@ -297,6 +307,15 @@ impl Sidecar {
     pub fn set_manual_caption(&mut self, text: &str) {
         let trimmed = text.trim();
         self.manual_caption = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+
+    pub fn set_caption_hint(&mut self, text: &str) {
+        let trimmed = text.trim();
+        self.caption_hint = if trimmed.is_empty() {
             None
         } else {
             Some(trimmed.to_string())
@@ -475,6 +494,41 @@ mod tests {
         sc.set_caption("blank", "   \n\n  ");
         sc.set_caption("real", "actual caption");
         assert_eq!(sc.export_caption().as_deref(), Some("actual caption"));
+    }
+
+    #[test]
+    fn caption_hint_round_trips_and_omits_when_empty() {
+        let mut sc = Sidecar::default();
+        sc.set_caption_hint("Left girl is Alice. Right boy is Bob.");
+        let serialized = ron::ser::to_string_pretty(&sc, pretty_config()).unwrap();
+        assert!(
+            serialized.contains("caption_hint"),
+            "non-empty hint must serialize: {serialized}"
+        );
+        let round: Sidecar = ron::de::from_str(&serialized).unwrap();
+        assert_eq!(
+            round.caption_hint.as_deref(),
+            Some("Left girl is Alice. Right boy is Bob.")
+        );
+
+        sc.set_caption_hint("   ");
+        let serialized = ron::ser::to_string_pretty(&sc, pretty_config()).unwrap();
+        assert!(
+            !serialized.contains("caption_hint"),
+            "empty hint must not appear in serialized form: {serialized}"
+        );
+    }
+
+    #[test]
+    fn old_sidecar_without_caption_hint_loads_cleanly() {
+        let ron_text = r#"(
+            manual_tags: ["foo"],
+            auto_tags: [],
+            booru_tags: [],
+        )"#;
+        let sc: Sidecar = ron::de::from_str(ron_text).unwrap();
+        assert!(sc.caption_hint.is_none());
+        assert_eq!(sc.manual_tags, vec!["foo".to_string()]);
     }
 
     #[test]

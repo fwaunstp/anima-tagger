@@ -37,12 +37,23 @@ impl OpenAiCaptioner {
         &mut self,
         image_path: &Path,
         prompt: &str,
+        context: Option<&str>,
     ) -> Result<String, CaptionerError> {
         let data_url = encode_image_data_url(
             image_path,
             self.profile.max_edge,
             self.profile.jpeg_quality,
         )?;
+
+        // Embed reference info in the same user turn as the image rather
+        // than as a separate `system` message, so the model sees image +
+        // context + instruction together. System messages tend to be
+        // interpreted as global persona/style guidance, which is the wrong
+        // framing for per-image facts like "left girl is Alice".
+        let prompt_text = match context {
+            Some(ctx) => format!("Context: {ctx}\n\n{prompt}"),
+            None => prompt.to_string(),
+        };
 
         let body = ChatRequest {
             model: self
@@ -60,7 +71,7 @@ impl OpenAiCaptioner {
                         image_url: ImageUrl { url: data_url },
                     },
                     ContentPart::Text {
-                        text: prompt.to_string(),
+                        text: prompt_text,
                     },
                 ],
             }],
