@@ -50,10 +50,7 @@ impl OpenAiCaptioner {
         // context + instruction together. System messages tend to be
         // interpreted as global persona/style guidance, which is the wrong
         // framing for per-image facts like "left girl is Alice".
-        let prompt_text = match context {
-            Some(ctx) => format!("Context: {ctx}\n\n{prompt}"),
-            None => prompt.to_string(),
-        };
+        let prompt_text = crate::build_user_text(prompt, context);
 
         let body = ChatRequest {
             model: self

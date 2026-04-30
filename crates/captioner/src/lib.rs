@@ -79,3 +79,22 @@ impl Captioner {
         }
     }
 }
+
+/// Build the user-turn text for a caption request: the optional reference
+/// context (character names, positions, …) followed by the actual prompt.
+///
+/// Bare "Context: …" gets ignored too easily — the model treats it as
+/// background and falls back to generic descriptions ("the girl on the
+/// left" instead of the provided name). The phrasing here explicitly
+/// instructs the model to *use* the names/details, while limiting it to
+/// description (so the prompt's actual task still drives the output).
+pub(crate) fn build_user_text(prompt: &str, context: Option<&str>) -> String {
+    match context {
+        Some(ctx) => format!(
+            "Use the following names and details when describing the image:\n\
+             {ctx}\n\n\
+             {prompt}"
+        ),
+        None => prompt.to_string(),
+    }
+}

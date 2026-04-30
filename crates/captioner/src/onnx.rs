@@ -458,10 +458,7 @@ fn build_chat_prompt(user_instruction: &str, context: Option<&str>) -> String {
     // the user turn next to the image rather than as a system turn — that
     // way the model sees image, context, and instruction together as one
     // unit instead of a free-floating persona-style preamble.
-    let body = match context {
-        Some(ctx) => format!("Context: {ctx}\n\n{user_instruction}"),
-        None => user_instruction.to_string(),
-    };
+    let body = crate::build_user_text(user_instruction, context);
     format!(
         "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{body}<|im_end|>\n\
          <|im_start|>assistant\n"
