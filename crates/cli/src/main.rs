@@ -291,10 +291,12 @@ fn cmd_metadata(
         let tags = anima_tagger_core::export::build_tags(&sidecar, &profile);
         let mut entry = serde_json::Map::new();
         if !tags.is_empty() {
-            entry.insert(
-                "tags".to_string(),
-                serde_json::Value::String(tags.join(", ")),
-            );
+            let joined = tags
+                .iter()
+                .map(|t| t.replace('_', " "))
+                .collect::<Vec<_>>()
+                .join(", ");
+            entry.insert("tags".to_string(), serde_json::Value::String(joined));
         }
         if let Some(cap) = sidecar.export_caption() {
             entry.insert("caption".to_string(), serde_json::Value::String(cap));

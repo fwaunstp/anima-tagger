@@ -90,7 +90,11 @@ pub fn export_image(
     profile: &ExportProfile,
 ) -> Result<PathBuf, ExportError> {
     let tags = build_tags(sidecar, profile);
-    let body = tags.join(", ");
+    let body = tags
+        .iter()
+        .map(|t| t.replace('_', " "))
+        .collect::<Vec<_>>()
+        .join(", ");
     let out = export_text_path(image);
     fs::write(&out, body).map_err(|source| ExportError::Io {
         path: out.clone(),
