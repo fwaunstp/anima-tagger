@@ -33,6 +33,7 @@ enum Filter {
     AutoTagged,
     NoManual,
     NoCaption,
+    NoHint,
     NoBooru,
 }
 
@@ -44,6 +45,7 @@ impl Filter {
             Self::AutoTagged => "Auto-tagged",
             Self::NoManual => "No manual tags",
             Self::NoCaption => "No caption",
+            Self::NoHint => "No caption hint",
             Self::NoBooru => "No booru",
         }
     }
@@ -54,6 +56,7 @@ impl Filter {
             Self::AutoTagged => item.sidecar.is_auto_tagged(),
             Self::NoManual => item.sidecar.manual_tags.is_empty(),
             Self::NoCaption => !item.sidecar.is_captioned(),
+            Self::NoHint => item.sidecar.caption_hint.is_none(),
             Self::NoBooru => !item.sidecar.has_booru(),
         }
     }
@@ -213,6 +216,7 @@ fn Toolbar(
                         "Auto-tagged" => Filter::AutoTagged,
                         "No manual tags" => Filter::NoManual,
                         "No caption" => Filter::NoCaption,
+                        "No caption hint" => Filter::NoHint,
                         "No booru" => Filter::NoBooru,
                         _ => Filter::All,
                     };
@@ -223,6 +227,7 @@ fn Toolbar(
                 option { value: "Auto-tagged", "Auto-tagged" }
                 option { value: "No manual tags", "No manual tags" }
                 option { value: "No caption", "No caption" }
+                option { value: "No caption hint", "No caption hint" }
                 option { value: "No booru", "No booru" }
             }
             input {
@@ -291,6 +296,11 @@ fn Thumb(item: ImageItem, mut selected: Signal<HashSet<PathBuf>>) -> Element {
     } else {
         " "
     };
+    let hint_flag = if item.sidecar.caption_hint.is_some() {
+        "H"
+    } else {
+        " "
+    };
     let path_for_click = item.path.clone();
 
     rsx! {
@@ -312,7 +322,11 @@ fn Thumb(item: ImageItem, mut selected: Signal<HashSet<PathBuf>>) -> Element {
                 }
             },
             img { src: "{item.thumbnail}" }
-            span { class: "thumb-status", "{auto_flag}{cap_flag}{booru_flag}{manual_flag}" }
+            span {
+                class: "thumb-status",
+                title: "T=auto-tagged · C=captioned · B=booru · M=manual tags · H=caption hint",
+                "{auto_flag}{cap_flag}{booru_flag}{manual_flag}{hint_flag}"
+            }
         }
     }
 }
