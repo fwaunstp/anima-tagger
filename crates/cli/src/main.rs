@@ -101,6 +101,22 @@ enum Command {
     },
     /// Show sidecar status for images in a directory.
     Status { dir: PathBuf },
+    /// Tokenize the would-be export text per image and flag overflows
+    /// against the training context budget. Uses ANIMA's text encoder
+    /// tokenizer (`Qwen/Qwen3-0.6B`).
+    Tokens {
+        dir: PathBuf,
+        /// Export profile (same semantics as `export`).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Override the auto-tag score threshold from the export profile.
+        #[arg(long)]
+        threshold: Option<f32>,
+        /// Token budget. Default 512 = ANIMA's qwen3 / t5
+        /// max_token_length training cap.
+        #[arg(long, default_value_t = 512)]
+        limit: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -132,6 +148,12 @@ fn main() -> Result<()> {
             output,
         } => cmd_metadata(dir, profile, threshold, output),
         Command::Status { dir } => cmd_status(dir),
+        Command::Tokens {
+            dir,
+            profile,
+            threshold,
+            limit,
+        } => cmd_tokens(dir, profile, threshold, limit),
     }
 }
 
@@ -422,6 +444,106 @@ fn cmd_status(dir: PathBuf) -> Result<()> {
                 let n = s.manual_tags.len();
                 println!("[{auto}{cap}{booru}] manual={n:<3} {}", image.display());
             }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_tokens(
+    dir: PathBuf,
+    profile_name: Option<String>,
+    threshold: Option<f32>,
+    limit: usize,
+) -> Result<()> {
+    use anima_tagger_core::hub;
+    use tokenizers::Tokenizer;
+
+    let cfg = ProjectConfig::load_or_default(&dir)
+        .with_context(|| format!("loading config in {}", dir.display()))?;
+    let mut profile = cfg.resolve_profile(profile_name.as_deref());
+    if let Some(t) = threshold {
+        profile.threshold = t;
+    }
+    profile.shuffle = false;
+
+    eprintln!("[tokens] fetching Qwen/Qwen3-0.6B tokenizer...");
+    let paths = hub::fetch_files("Qwen/Qwen3-0.6B", None, &["tokenizer.json"])
+        .context("download Qwen3-0.6B tokenizer.json")?;
+    let tokenizer = Tokenizer::from_file(&paths[0])
+        .map_err(|e| anyhow::anyhow!("load tokenizer: {e}"))?;
+
+    let count = |s: &str| -> Result<usize> {
+        if s.is_empty() {
+            return Ok(0);
+        }
+        let enc = tokenizer
+            .encode(s, false)
+            .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?;
+        Ok(enc.len())
+    };
+
+    let mut totals: Vec<usize> = Vec::new();
+    let mut over: Vec<(PathBuf, usize, usize, usize)> = Vec::new();
+    let mut analyzed = 0usize;
+    let mut no_sidecar = 0usize;
+
+    for image in iter_images(&dir) {
+        let Some(sidecar) = Sidecar::load(&image)? else {
+            no_sidecar += 1;
+            continue;
+        };
+        let tags = anima_tagger_core::export::build_tags(&sidecar, &profile);
+        let tags_text = tags
+            .iter()
+            .map(|t| t.replace('_', " "))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let caption_text = sidecar.export_caption().unwrap_or_default();
+
+        let tag_tok = count(&tags_text)?;
+        let cap_tok = count(&caption_text)?;
+        // The trainer concatenates them as one input; a single space
+        // tokenizes to 0 or 1 BPE pieces, so plain sum is a tight upper
+        // bound on the combined length.
+        let total = tag_tok + cap_tok;
+        totals.push(total);
+        if total > limit {
+            over.push((image.clone(), total, tag_tok, cap_tok));
+        }
+        analyzed += 1;
+    }
+
+    if analyzed == 0 {
+        println!("no images with sidecar (no_sidecar={no_sidecar})");
+        return Ok(());
+    }
+
+    totals.sort_unstable();
+    let max = *totals.last().unwrap();
+    let pct = |p: f32| -> usize {
+        let i = ((totals.len() as f32 - 1.0) * p).round() as usize;
+        totals[i.min(totals.len() - 1)]
+    };
+
+    println!(
+        "analyzed {analyzed} images (skipped {no_sidecar} without sidecar) | budget {limit}"
+    );
+    println!(
+        "tokens p50={} p90={} p99={} max={} | over budget: {}",
+        pct(0.5),
+        pct(0.9),
+        pct(0.99),
+        max,
+        over.len()
+    );
+
+    if !over.is_empty() {
+        println!("\noverflows:");
+        for (path, total, tag_tok, cap_tok) in &over {
+            println!(
+                "  {total:>4} (tags={tag_tok}, caption={cap_tok})  {}",
+                path.display()
+            );
         }
     }
     Ok(())

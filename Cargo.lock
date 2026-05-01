@@ -79,6 +79,7 @@ dependencies = [
  "chrono",
  "clap",
  "serde_json",
+ "tokenizers",
 ]
 
 [[package]]
