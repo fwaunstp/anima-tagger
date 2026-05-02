@@ -10,13 +10,20 @@ use anima_tagger_core::walk::iter_images;
 use anima_tagger_tagger::Tagger;
 use base64::Engine;
 use chrono::Utc;
+use dioxus::desktop::{Config, WindowBuilder};
 use dioxus::prelude::*;
+use dioxus::LaunchBuilder;
 use image::ImageFormat;
 
 const THUMB_SIZE: u32 = 256;
 
 fn main() {
-    dioxus::launch(App);
+    let window = WindowBuilder::new()
+        .with_title("anima-tagger")
+        .with_always_on_top(false);
+    LaunchBuilder::desktop()
+        .with_cfg(Config::new().with_window(window))
+        .launch(App);
 }
 
 #[derive(Clone, PartialEq)]
