@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **GUI rewritten from dioxus-desktop to egui / eframe.** The release
+  binaries are now genuinely single-file: macOS, Linux, and Windows
+  builds ship a single `anima-tagger-gui` binary with no `.app`,
+  AppImage, or MSI wrapper. The Linux build keeps a glibc 2.39 floor
+  (still inherited from the prebuilt onnxruntime), but no longer
+  depends on webkit2gtk or other extra runtime installs.
+- Bundled `NotoSansJP-Regular.otf` (~4.5 MB JP-only subset) for CJK
+  rendering, since egui's default font set is latin-only. Total
+  release-build size: ~40 MB.
+
+### Removed
+
+- `Dioxus.toml`, `packaging/macos/{Info.plist.template,build-app.sh}`,
+  the `dx bundle` step in the release workflow, and the
+  `libwebkit2gtk-4.1-dev` / `libxdo-dev` apt installs in CI.
+
 ## [0.1.0] — 2026-05-04
 
 First public release. Everything below is the initial feature set; future
