@@ -1,3 +1,5 @@
+mod i18n;
+
 use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
@@ -15,6 +17,8 @@ use dioxus::desktop::{Config, WindowBuilder};
 use dioxus::prelude::*;
 use dioxus::LaunchBuilder;
 use image::ImageFormat;
+
+use crate::i18n::{Lang, T, load_pref_or_detect, save_pref};
 
 const THUMB_SIZE: u32 = 256;
 
@@ -46,15 +50,29 @@ enum Filter {
 }
 
 impl Filter {
-    fn label(self) -> &'static str {
+    /// Stable string key — used as the `<option value="...">` so we can
+    /// map back to the enum regardless of which language the option
+    /// label is currently rendered in.
+    fn key(self) -> &'static str {
         match self {
-            Self::All => "All",
-            Self::Untagged => "Untagged",
-            Self::AutoTagged => "Auto-tagged",
-            Self::NoManual => "No manual tags",
-            Self::NoCaption => "No caption",
-            Self::NoHint => "No caption hint",
-            Self::NoBooru => "No booru",
+            Self::All => "all",
+            Self::Untagged => "untagged",
+            Self::AutoTagged => "auto-tagged",
+            Self::NoManual => "no-manual",
+            Self::NoCaption => "no-caption",
+            Self::NoHint => "no-hint",
+            Self::NoBooru => "no-booru",
+        }
+    }
+    fn from_key(s: &str) -> Self {
+        match s {
+            "untagged" => Self::Untagged,
+            "auto-tagged" => Self::AutoTagged,
+            "no-manual" => Self::NoManual,
+            "no-caption" => Self::NoCaption,
+            "no-hint" => Self::NoHint,
+            "no-booru" => Self::NoBooru,
+            _ => Self::All,
         }
     }
     fn matches(self, item: &ImageItem) -> bool {
@@ -86,6 +104,12 @@ fn App() -> Element {
     let config_open = use_signal(|| false);
     let config_text = use_signal(String::new);
     let config_error = use_signal(|| None::<String>);
+
+    // Localization. Provided as context so every component can read it
+    // without prop-drilling through every layer. Toolbar mutates the
+    // context signal when the user picks a different language.
+    let lang_signal = use_context_provider(|| Signal::new(load_pref_or_detect()));
+    let _ = lang_signal;
 
     let tag_query = tag_filter.read().trim().to_lowercase();
     let visible: Vec<ImageItem> = images
@@ -230,13 +254,17 @@ fn Toolbar(
         config_open.set(true);
     };
 
+    let mut lang_signal = use_context::<Signal<Lang>>();
+    let lang = *lang_signal.read();
+    let t = T::new(lang);
+
     let folder_label = match folder.read().as_ref() {
         Some(p) => p
             .file_name()
             .and_then(|s| s.to_str())
             .map(String::from)
             .unwrap_or_else(|| p.display().to_string()),
-        None => "(no folder)".to_string(),
+        None => t.no_folder().to_string(),
     };
     let count = images.read().len();
     let sel_count = selected.read().len();
@@ -245,39 +273,28 @@ fn Toolbar(
 
     rsx! {
         div { class: "toolbar",
-            button { onclick: on_open, "Open folder…" }
+            button { onclick: on_open, "{t.open_folder()}" }
             button {
                 class: "secondary",
-                title: "Edit anima-tagger.toml for the current dataset folder",
+                title: "{t.config_button_title()}",
                 onclick: on_open_config,
-                "Config…"
+                "{t.config_button()}"
             }
             span { class: "folder-name", "{folder_label}" }
             select {
-                value: "{filter.read().label()}",
-                onchange: move |evt| {
-                    let f = match evt.value().as_str() {
-                        "Untagged" => Filter::Untagged,
-                        "Auto-tagged" => Filter::AutoTagged,
-                        "No manual tags" => Filter::NoManual,
-                        "No caption" => Filter::NoCaption,
-                        "No caption hint" => Filter::NoHint,
-                        "No booru" => Filter::NoBooru,
-                        _ => Filter::All,
-                    };
-                    filter.set(f);
-                },
-                option { value: "All", "All" }
-                option { value: "Untagged", "Untagged" }
-                option { value: "Auto-tagged", "Auto-tagged" }
-                option { value: "No manual tags", "No manual tags" }
-                option { value: "No caption", "No caption" }
-                option { value: "No caption hint", "No caption hint" }
-                option { value: "No booru", "No booru" }
+                value: "{filter.read().key()}",
+                onchange: move |evt| filter.set(Filter::from_key(evt.value().as_str())),
+                option { value: "all", "{t.filter_all()}" }
+                option { value: "untagged", "{t.filter_untagged()}" }
+                option { value: "auto-tagged", "{t.filter_auto_tagged()}" }
+                option { value: "no-manual", "{t.filter_no_manual()}" }
+                option { value: "no-caption", "{t.filter_no_caption()}" }
+                option { value: "no-hint", "{t.filter_no_hint()}" }
+                option { value: "no-booru", "{t.filter_no_booru()}" }
             }
             input {
                 class: "tag-filter",
-                placeholder: "filter by tag…",
+                placeholder: "{t.tag_filter_placeholder()}",
                 value: "{tag_filter}",
                 oninput: move |evt| tag_filter.set(evt.value()),
             }
@@ -285,40 +302,57 @@ fn Toolbar(
                 class: "secondary",
                 onclick: select_all_visible,
                 disabled: !folder_set,
-                "Select visible"
+                "{t.select_visible()}"
             }
             button {
                 class: "secondary",
                 onclick: clear_selection,
                 disabled: !has_sel,
-                "Clear sel."
+                "{t.clear_selection()}"
             }
             span { class: "spacer" }
             button {
-                onclick: move |_| run_tagger(folder, images, selected, tagger_state, error_msg, loading),
+                onclick: move |_| run_tagger(folder, images, selected, tagger_state, error_msg, loading, lang),
                 disabled: !has_sel || *loading.read(),
-                "Run tagger"
+                "{t.run_tagger()}"
             }
             button {
-                onclick: move |_| run_captioner(folder, images, selected, captioner_state, error_msg, loading),
+                onclick: move |_| run_captioner(folder, images, selected, captioner_state, error_msg, loading, lang),
                 disabled: !has_sel || *loading.read(),
-                "Run captioner"
+                "{t.run_captioner()}"
             }
             button {
                 onclick: move |_| run_booru(images, selected, error_msg, loading),
                 disabled: !has_sel || *loading.read(),
-                "Fetch booru"
+                "{t.fetch_booru()}"
             }
-            if *loading.read() { span { class: "muted", "Working…" } }
-            span { class: "muted", "{count} images · {sel_count} selected" }
+            select {
+                class: "lang-select",
+                title: "{t.lang_select_title()}",
+                value: "{lang.code()}",
+                onchange: move |evt| {
+                    let new = match evt.value().as_str() {
+                        "ja" => Lang::Ja,
+                        _ => Lang::En,
+                    };
+                    save_pref(new);
+                    lang_signal.set(new);
+                },
+                option { value: "en", "English" }
+                option { value: "ja", "日本語" }
+            }
+            if *loading.read() { span { class: "muted", "{t.working()}" } }
+            span { class: "muted", "{t.images_selected_summary(count, sel_count)}" }
         }
     }
 }
 
 #[component]
 fn Grid(items: Vec<ImageItem>, mut selected: Signal<HashSet<PathBuf>>) -> Element {
+    let lang = *use_context::<Signal<Lang>>().read();
+    let t = T::new(lang);
     if items.is_empty() {
-        return rsx! { div { class: "grid empty", p { class: "muted", "No images." } } };
+        return rsx! { div { class: "grid empty", p { class: "muted", "{t.no_images()}" } } };
     }
     rsx! {
         div { class: "grid",
@@ -331,6 +365,8 @@ fn Grid(items: Vec<ImageItem>, mut selected: Signal<HashSet<PathBuf>>) -> Elemen
 
 #[component]
 fn Thumb(item: ImageItem, mut selected: Signal<HashSet<PathBuf>>) -> Element {
+    let lang = *use_context::<Signal<Lang>>().read();
+    let t = T::new(lang);
     let is_selected = selected.read().contains(&item.path);
     let class = if is_selected { "thumb selected" } else { "thumb" };
     let auto_flag = if item.sidecar.is_auto_tagged() { "T" } else { " " };
@@ -369,7 +405,7 @@ fn Thumb(item: ImageItem, mut selected: Signal<HashSet<PathBuf>>) -> Element {
             img { src: "{item.thumbnail}" }
             span {
                 class: "thumb-status",
-                title: "T=auto-tagged · C=captioned · B=booru · M=manual tags · H=caption hint",
+                title: "{t.thumb_status_title()}",
                 "{auto_flag}{cap_flag}{booru_flag}{manual_flag}{hint_flag}"
             }
         }
@@ -382,18 +418,16 @@ fn DetailPanel(
     selected: Signal<HashSet<PathBuf>>,
     mut tag_input: Signal<String>,
 ) -> Element {
+    let lang = *use_context::<Signal<Lang>>().read();
+    let t = T::new(lang);
     let sel_paths: Vec<PathBuf> = selected.read().iter().cloned().collect();
     let n = sel_paths.len();
 
     if n == 0 {
         return rsx! {
             aside { class: "detail",
-                p { class: "muted", "Select one or more images to edit tags." }
-                p { class: "muted small",
-                    "Tip: type "
-                    code { "-tag" }
-                    " in the input to suppress an auto/booru tag (it stays in the data but is hidden from export)."
-                }
+                p { class: "muted", "{t.select_to_edit()}" }
+                p { class: "muted small", "{t.tip_suppress()}" }
             }
         };
     }
@@ -437,7 +471,7 @@ fn DetailPanel(
 
             div { class: "input-row",
                 input {
-                    placeholder: "tag, or -tag to suppress",
+                    placeholder: "{t.add_input_placeholder()}",
                     value: "{tag_input}",
                     oninput: move |evt| tag_input.set(evt.value()),
                     onkeydown: move |evt: KeyboardEvent| {
@@ -454,7 +488,7 @@ fn DetailPanel(
                         do_add(v);
                         tag_input.set(String::new());
                     },
-                    "Add"
+                    "{t.add_button()}"
                 }
             }
         }
@@ -470,6 +504,8 @@ fn SingleDetail(
 ) -> Element {
     let _ = selected;
     let _ = tag_input;
+    let lang = *use_context::<Signal<Lang>>().read();
+    let t = T::new(lang);
     let path = item.path.clone();
     let filename = path
         .file_name()
@@ -486,9 +522,9 @@ fn SingleDetail(
     rsx! {
         p { class: "filename", "{filename}" }
 
-        div { class: "section-title", "Tags" }
+        div { class: "section-title", "{t.section_tags()}" }
         if manual_positives.is_empty() && item.sidecar.auto_tags.is_empty() && item.sidecar.booru_tags.is_empty() {
-            p { class: "muted", "(none yet — add manual or run tagger/booru)" }
+            p { class: "muted", "{t.empty_tags()}" }
         } else {
             div { class: "tag-list",
                 for tag in manual_positives.iter().cloned() {
@@ -548,7 +584,7 @@ fn SingleDetail(
             }
         }
 
-        div { class: "section-title", "Caption hint (passed to captioner only)" }
+        div { class: "section-title", "{t.section_caption_hint()}" }
         {
             let hint_text = item.sidecar.caption_hint.clone().unwrap_or_default();
             let editor_key = format!("hint::{}::{}", path.display(), hint_text);
@@ -562,7 +598,7 @@ fn SingleDetail(
             }
         }
 
-        div { class: "section-title", "Caption (manual — exported)" }
+        div { class: "section-title", "{t.section_manual_caption()}" }
         {
             let manual_text = item.sidecar.manual_caption.clone().unwrap_or_default();
             let editor_key = format!("{}::{}", path.display(), manual_text);
@@ -576,9 +612,9 @@ fn SingleDetail(
             }
         }
 
-        div { class: "section-title", "Auto captions" }
+        div { class: "section-title", "{t.section_auto_captions()}" }
         if item.sidecar.captions.is_empty() {
-            p { class: "muted small", "(none — run captioner)" }
+            p { class: "muted small", "{t.empty_auto_captions()}" }
         } else {
             for (model, entry) in item.sidecar.captions.iter() {
                 {
@@ -592,21 +628,17 @@ fn SingleDetail(
                     let path_for_remove = path.clone();
                     let skipped = entry.skip;
                     let block_class = if skipped { "auto-caption skipped" } else { "auto-caption" };
-                    let skip_label = if skipped { "unskip" } else { "skip" };
-                    let skip_title = if skipped {
-                        "Re-enable this caption for export"
-                    } else {
-                        "Keep this caption stored but exclude from export"
-                    };
+                    let skip_label = if skipped { t.unskip() } else { t.skip() };
+                    let skip_title = if skipped { t.unskip_title() } else { t.skip_title() };
                     rsx! {
                         div { class: "{block_class}",
                             div { class: "auto-caption-head",
                                 span { class: "model-name", "{model_name}" }
                                 button {
                                     class: "tiny",
-                                    title: "Copy this caption into the manual caption field",
+                                    title: "{t.promote_to_manual_title()}",
                                     onclick: move |_| copy_caption_to_manual(images, path_for_copy.clone(), text_for_copy.clone()),
-                                    "→ manual"
+                                    "{t.promote_to_manual()}"
                                 }
                                 button {
                                     class: "tiny secondary",
@@ -616,7 +648,7 @@ fn SingleDetail(
                                 }
                                 button {
                                     class: "tiny secondary",
-                                    title: "Remove this auto caption",
+                                    title: "{t.remove_caption_title()}",
                                     onclick: move |_| remove_caption_at(images, path_for_remove.clone(), model_for_remove.clone()),
                                     "×"
                                 }
@@ -628,7 +660,7 @@ fn SingleDetail(
             }
         }
         if let Some(b) = item.sidecar.booru.as_ref() {
-            div { class: "section-title", "Booru" }
+            div { class: "section-title", "{t.section_booru()}" }
             p { class: "muted small",
                 "{b.source}"
                 if let Some(id) = b.post_id { ": #{id}" }
@@ -643,12 +675,14 @@ fn ManualCaptionEditor(
     images: Signal<Vec<ImageItem>>,
     initial: String,
 ) -> Element {
+    let lang = *use_context::<Signal<Lang>>().read();
+    let t = T::new(lang);
     let mut buf = use_signal(|| initial.clone());
     let path_for_change = path.clone();
     rsx! {
         textarea {
             class: "manual-caption",
-            placeholder: "Manual caption — exported verbatim, overrides any auto captions. Leave empty to export the auto captions instead. Click outside to save.",
+            placeholder: "{t.manual_caption_placeholder()}",
             value: "{buf}",
             rows: "3",
             oninput: move |evt| buf.set(evt.value()),
@@ -671,12 +705,14 @@ fn CaptionHintEditor(
     images: Signal<Vec<ImageItem>>,
     initial: String,
 ) -> Element {
+    let lang = *use_context::<Signal<Lang>>().read();
+    let t = T::new(lang);
     let mut buf = use_signal(|| initial.clone());
     let path_for_change = path.clone();
     rsx! {
         textarea {
             class: "manual-caption",
-            placeholder: "Reference info for the captioner (e.g. \"The girl with red hair on the left is Alice; the boy on the right is Bob.\"). Sent as a system turn — does NOT appear in the exported .txt. Click outside to save.",
+            placeholder: "{t.caption_hint_placeholder()}",
             value: "{buf}",
             rows: "3",
             oninput: move |evt| buf.set(evt.value()),
@@ -822,13 +858,15 @@ fn BulkCaptionHintEditor(
     images: Signal<Vec<ImageItem>>,
     initial: String,
 ) -> Element {
+    let lang = *use_context::<Signal<Lang>>().read();
+    let t = T::new(lang);
     let mut buf = use_signal(|| initial.clone());
     let paths_for_apply = paths.clone();
     let paths_for_clear = paths.clone();
     rsx! {
         textarea {
             class: "manual-caption",
-            placeholder: "Reference info applied to every selected image. Sent to the captioner as a system turn.",
+            placeholder: "{t.bulk_hint_placeholder()}",
             value: "{buf}",
             rows: "3",
             oninput: move |evt| buf.set(evt.value()),
@@ -840,7 +878,7 @@ fn BulkCaptionHintEditor(
                     let text = buf.read().clone();
                     bulk_set_caption_hint(images, paths_for_apply.clone(), text);
                 },
-                "Apply to all selected"
+                "{t.bulk_hint_apply()}"
             }
             button {
                 class: "tiny secondary",
@@ -848,7 +886,7 @@ fn BulkCaptionHintEditor(
                     buf.set(String::new());
                     bulk_set_caption_hint(images, paths_for_clear.clone(), String::new());
                 },
-                "Clear"
+                "{t.bulk_hint_clear()}"
             }
         }
     }
@@ -877,6 +915,8 @@ fn BulkDetail(
     tag_input: Signal<String>,
 ) -> Element {
     let _ = tag_input;
+    let lang = *use_context::<Signal<Lang>>().read();
+    let t = T::new(lang);
     let n = selected_paths.len();
     let selected_items: Vec<&ImageItem> = items
         .iter()
@@ -964,11 +1004,11 @@ fn BulkDetail(
     );
 
     rsx! {
-        p { class: "muted", "{n} images selected — bulk edit" }
+        p { class: "muted", "{t.n_selected_bulk(n)}" }
 
-        div { class: "section-title", "Caption hint (apply to all selected)" }
+        div { class: "section-title", "{t.section_bulk_caption_hint()}" }
         if !hints_uniform {
-            p { class: "muted small", "(selected images have differing hints — applying will overwrite all)" }
+            p { class: "muted small", "{t.bulk_hints_differ()}" }
         }
         BulkCaptionHintEditor {
             key: "{bulk_hint_key}",
@@ -977,9 +1017,9 @@ fn BulkDetail(
             initial: common_hint,
         }
 
-        div { class: "section-title", "Manual entries (union)" }
+        div { class: "section-title", "{t.section_manual_entries()}" }
         if manual_order.is_empty() {
-            p { class: "muted", "(none)" }
+            p { class: "muted", "{t.empty_simple()}" }
         } else {
             div { class: "tag-list",
                 for tag in manual_order.into_iter() {
@@ -1008,9 +1048,9 @@ fn BulkDetail(
             }
         }
 
-        div { class: "section-title", "Common tags (auto/booru, ≥2 images)" }
+        div { class: "section-title", "{t.section_common_tags()}" }
         if common_tags.is_empty() {
-            p { class: "muted small", "(none)" }
+            p { class: "muted small", "{t.empty_simple()}" }
         } else {
             div { class: "tag-list",
                 for (tag, count) in common_tags.into_iter() {
@@ -1024,19 +1064,19 @@ fn BulkDetail(
             }
         }
 
-        div { class: "section-title", "Manual caption (bulk)" }
+        div { class: "section-title", "{t.section_bulk_manual_caption()}" }
         div { class: "tag-list",
             button {
                 class: "tiny secondary",
-                title: "Clear manual_caption on all selected images so a follow-up promote can repopulate it.",
+                title: "{t.bulk_clear_manual_title()}",
                 onclick: move |_| bulk_clear_manual_caption(images, selected_paths.clone()),
-                "Clear manual"
+                "{t.bulk_clear_manual()}"
             }
         }
 
-        div { class: "section-title", "Auto captions (by model)" }
+        div { class: "section-title", "{t.section_bulk_auto_captions()}" }
         if caption_order.is_empty() {
-            p { class: "muted small", "(none)" }
+            p { class: "muted small", "{t.empty_simple()}" }
         } else {
             div { class: "tag-list",
                 for model in caption_order.into_iter() {
@@ -1052,13 +1092,13 @@ fn BulkDetail(
                                 "{label}"
                                 span {
                                     class: "chip-x",
-                                    title: "Copy this caption into manual_caption on every selected image whose manual is empty.",
+                                    title: "{t.bulk_promote_title()}",
                                     onclick: move |_| bulk_promote_to_manual(images, paths_promote.clone(), model_promote.clone()),
-                                    "→ manual"
+                                    "{t.promote_to_manual()}"
                                 }
                                 span {
                                     class: "chip-x",
-                                    title: "Remove this model's caption from all selected",
+                                    title: "{t.bulk_remove_caption_title()}",
                                     onclick: move |_| bulk_remove_caption(images, paths_remove.clone(), model_remove.clone()),
                                     "×"
                                 }
@@ -1069,9 +1109,7 @@ fn BulkDetail(
             }
         }
 
-        p { class: "muted small",
-            "Switch to single selection to suppress individual auto/booru tags."
-        }
+        p { class: "muted small", "{t.switch_to_single_hint()}" }
     }
 }
 
@@ -1084,9 +1122,11 @@ fn run_tagger(
     mut tagger_state: Signal<Option<Tagger>>,
     mut error_msg: Signal<Option<String>>,
     mut loading: Signal<bool>,
+    lang: Lang,
 ) {
+    let tt = T::new(lang);
     let Some(folder_path) = folder.read().clone() else {
-        error_msg.set(Some("Open a folder first.".into()));
+        error_msg.set(Some(tt.err_open_folder_first()));
         return;
     };
     let cfg = match ProjectConfig::load_or_default(&folder_path) {
@@ -1153,9 +1193,11 @@ fn run_captioner(
     mut captioner_state: Signal<Option<Captioner>>,
     mut error_msg: Signal<Option<String>>,
     mut loading: Signal<bool>,
+    lang: Lang,
 ) {
+    let tt = T::new(lang);
     let Some(folder_path) = folder.read().clone() else {
-        error_msg.set(Some("Open a folder first.".into()));
+        error_msg.set(Some(tt.err_open_folder_first()));
         return;
     };
     let cfg = match ProjectConfig::load_or_default(&folder_path) {
@@ -1300,12 +1342,14 @@ fn ConfigEditor(
     mut captioner_state: Signal<Option<Captioner>>,
     mut error_msg: Signal<Option<String>>,
 ) -> Element {
+    let lang = *use_context::<Signal<Lang>>().read();
+    let t = T::new(lang);
     let folder_path = folder.read().clone();
     let target_path = folder_path.as_ref().map(|p| p.join(CONFIG_FILE));
     let target_label = target_path
         .as_ref()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "(no folder)".to_string());
+        .unwrap_or_else(|| t.no_folder().to_string());
     let target_for_save = target_path.clone();
 
     let on_validate = move |_| {
@@ -1323,7 +1367,7 @@ fn ConfigEditor(
             return;
         }
         let Some(target) = target_for_save.clone() else {
-            error_msg.set(Some("Open a folder first.".into()));
+            error_msg.set(Some(t.err_open_folder_first()));
             return;
         };
         if let Err(e) = fs::write(&target, text.as_bytes()) {
@@ -1369,12 +1413,12 @@ fn ConfigEditor(
                     pre { class: "config-error", "{err}" }
                 }
                 div { class: "modal-actions",
-                    button { class: "tiny secondary", onclick: on_validate, "Validate" }
-                    button { class: "tiny", onclick: on_save, "Save & reload" }
+                    button { class: "tiny secondary", onclick: on_validate, "{t.config_validate()}" }
+                    button { class: "tiny", onclick: on_save, "{t.config_save()}" }
                     button {
                         class: "tiny secondary",
                         onclick: move |_| close_editor(),
-                        "Cancel"
+                        "{t.config_cancel()}"
                     }
                 }
             }
@@ -1422,6 +1466,7 @@ body {
 }
 .toolbar input.tag-filter { width: 160px; }
 .toolbar input.tag-filter:focus { outline: 1px solid #4a9eff; border-color: #4a9eff; }
+.toolbar select.lang-select { min-width: 96px; }
 .error-banner {
     background: #5a1f1f; color: #ffd0d0;
     padding: 6px 12px; border-bottom: 1px solid #732;

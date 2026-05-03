@@ -21,3 +21,4 @@ rfd = "0.15"
 image = { workspace = true }
 base64 = "0.22"
 toml = { workspace = true }
+sys-locale = "0.3"
