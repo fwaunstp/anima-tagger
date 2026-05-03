@@ -1010,11 +1010,18 @@ fn BulkDetail(
         if !hints_uniform {
             p { class: "muted small", "{t.bulk_hints_differ()}" }
         }
-        BulkCaptionHintEditor {
-            key: "{bulk_hint_key}",
-            paths: selected_paths.clone(),
-            images,
-            initial: common_hint,
+        // dioxus 0.7 only accepts `key` on the first node of an rsx
+        // block, so we wrap the editor in its own block to keep the
+        // remount-on-bulk_hint_key-change behavior.
+        {
+            rsx! {
+                BulkCaptionHintEditor {
+                    key: "{bulk_hint_key}",
+                    paths: selected_paths.clone(),
+                    images,
+                    initial: common_hint,
+                }
+            }
         }
 
         div { class: "section-title", "{t.section_manual_entries()}" }
