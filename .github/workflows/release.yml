@@ -1,0 +1,182 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (must already exist; use vX.Y.Z)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: build / ${{ matrix.target.name }}
+    runs-on: ${{ matrix.target.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: macos-arm64
+            runner: macos-14
+            os: macos
+            gui_pkg: macos
+            gui_glob: "*.app"
+            cli_archive: tar.gz
+          - name: linux-x64
+            runner: ubuntu-22.04
+            os: linux
+            gui_pkg: appimage
+            gui_glob: "*.AppImage"
+            cli_archive: tar.gz
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm
+            os: linux
+            gui_pkg: appimage
+            gui_glob: "*.AppImage"
+            cli_archive: tar.gz
+          - name: windows-x64
+            runner: windows-2022
+            os: windows
+            gui_pkg: msi
+            gui_glob: "*.msi"
+            cli_archive: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target.name }}
+
+      - name: install linux deps (webkit2gtk + AppImage tooling)
+        if: matrix.target.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            pkg-config \
+            build-essential \
+            libssl-dev \
+            libfuse2 \
+            file \
+            zip
+
+      - uses: cargo-bins/cargo-binstall@main
+
+      - name: install dioxus-cli
+        run: cargo binstall --no-confirm --force dioxus-cli
+
+      - name: build CLI
+        run: cargo build --release -p anima-tagger-cli
+
+      - name: bundle GUI
+        working-directory: crates/gui
+        run: dx bundle --release --package-types ${{ matrix.target.gui_pkg }}
+
+      - name: stage artifacts
+        shell: bash
+        env:
+          TARGET_NAME: ${{ matrix.target.name }}
+          OS: ${{ matrix.target.os }}
+          GUI_GLOB: ${{ matrix.target.gui_glob }}
+          CLI_ARCHIVE: ${{ matrix.target.cli_archive }}
+        run: |
+          set -euxo pipefail
+          mkdir -p staging
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+            VERSION="${VERSION#v}"
+          fi
+
+          # Locate dx bundle output (path varies between dx versions; glob from target/).
+          mapfile -t GUI_OUT < <(find target -type f -name "${GUI_GLOB}" 2>/dev/null || true)
+          # macOS .app is a directory, not a file.
+          if [ "$OS" = "macos" ]; then
+            mapfile -t GUI_OUT < <(find target -type d -name "*.app" 2>/dev/null || true)
+          fi
+          if [ ${#GUI_OUT[@]} -eq 0 ]; then
+            echo "no GUI bundle produced — searched for ${GUI_GLOB} under target/" >&2
+            find target -maxdepth 6 -type d -name 'bundle' -o -name 'dx' 2>/dev/null | head -20
+            exit 1
+          fi
+          BUNDLE_SRC="${GUI_OUT[0]}"
+          echo "found bundle: $BUNDLE_SRC"
+
+          case "$OS" in
+            macos)
+              # Tar the .app so file permissions and bundle structure survive.
+              GUI_OUT_NAME="anima-tagger-${VERSION}-${TARGET_NAME}.app.tar.gz"
+              ( cd "$(dirname "$BUNDLE_SRC")" && tar czf "${GITHUB_WORKSPACE}/staging/${GUI_OUT_NAME}" "$(basename "$BUNDLE_SRC")" )
+              ;;
+            linux)
+              GUI_OUT_NAME="anima-tagger-${VERSION}-${TARGET_NAME}.AppImage"
+              cp "$BUNDLE_SRC" "staging/${GUI_OUT_NAME}"
+              chmod +x "staging/${GUI_OUT_NAME}"
+              ;;
+            windows)
+              GUI_OUT_NAME="anima-tagger-${VERSION}-${TARGET_NAME}.msi"
+              cp "$BUNDLE_SRC" "staging/${GUI_OUT_NAME}"
+              ;;
+          esac
+
+          # CLI archive
+          CLI_BIN="target/release/anima-tagger"
+          [ "$OS" = "windows" ] && CLI_BIN="target/release/anima-tagger.exe"
+          CLI_NAME="anima-tagger-cli-${VERSION}-${TARGET_NAME}"
+          if [ "$CLI_ARCHIVE" = "zip" ]; then
+            ( cd "$(dirname "$CLI_BIN")" && 7z a "${GITHUB_WORKSPACE}/staging/${CLI_NAME}.zip" "$(basename "$CLI_BIN")" )
+          else
+            tar czf "staging/${CLI_NAME}.tar.gz" -C "$(dirname "$CLI_BIN")" "$(basename "$CLI_BIN")"
+          fi
+
+          ls -la staging
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target.name }}
+          path: staging/*
+          if-no-files-found: error
+
+  release:
+    name: publish github release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: staging
+          merge-multiple: true
+
+      - name: list artifacts
+        run: ls -la staging
+
+      - name: compute checksums
+        working-directory: staging
+        run: sha256sum * > SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: staging/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          draft: false
+          prerelease: false
