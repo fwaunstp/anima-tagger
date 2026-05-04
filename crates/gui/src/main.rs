@@ -299,7 +299,19 @@ impl eframe::App for AnimaTaggerApp {
             // the thumbnail grid. Cap it to a sensible maximum.
             .max_width(600.0)
             .show(ctx, |ui| {
-                self.ui_detail(ui);
+                // Reserve the add-input row at the bottom first so the
+                // ScrollArea inside ui_detail doesn't claim every
+                // pixel of vertical space and hide it.
+                egui::TopBottomPanel::bottom("add_input_panel")
+                    .resizable(false)
+                    .show_inside(ui, |ui| {
+                        ui.add_space(4.0);
+                        self.ui_add_input(ui);
+                        ui.add_space(4.0);
+                    });
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    self.ui_detail(ui);
+                });
             });
         egui::CentralPanel::default().show(ctx, |ui| {
             self.ui_grid(ui);
@@ -566,9 +578,6 @@ impl AnimaTaggerApp {
             ui.label(t.select_to_edit());
             ui.add_space(6.0);
             ui.label(egui::RichText::new(t.tip_suppress()).small().weak());
-            ui.add_space(8.0);
-            ui.separator();
-            self.ui_add_input(ui);
             return;
         }
 
@@ -580,8 +589,6 @@ impl AnimaTaggerApp {
                 .show(ui, |ui| {
                     self.ui_single_detail(ui, &path);
                 });
-            ui.separator();
-            self.ui_add_input(ui);
         } else {
             self.last_single = None;
             let signature = bulk_signature(&sel);
@@ -594,8 +601,6 @@ impl AnimaTaggerApp {
                 .show(ui, |ui| {
                     self.ui_bulk_detail(ui, &sel);
                 });
-            ui.separator();
-            self.ui_add_input(ui);
         }
     }
 
